@@ -1,0 +1,1048 @@
+'use strict';
+/*
+ * Igelpflege – lokale Web-App (PWA) zur Verwaltung von Igeln in einer Pflegestelle.
+ * Alle Daten liegen ausschließlich in der IndexedDB dieses Geräts.
+ * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
+ */
+(function () {
+  const VERSION = '1.0.0';
+
+  // ---------- Konstanten ----------
+  const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
+  const DATA_STORES = STORES.filter((s) => s !== 'settings');
+  const STATUS = [['aufnahme', 'Aufnahme'], ['pflege', 'In Pflege'], ['winterschlaf', 'Winterschlaf'], ['ausgewildert', 'Ausgewildert'], ['weitergegeben', 'Weitergegeben'], ['verstorben', 'Verstorben']];
+  const STATUS_L = Object.fromEntries(STATUS);
+  const ACTIVE = new Set(['aufnahme', 'pflege', 'winterschlaf']);
+  const GESCHLECHT = [['unbekannt', 'unbekannt'], ['m', 'männlich'], ['w', 'weiblich']];
+  const ALTER = [['unbekannt', 'unbekannt'], ['saeugling', 'Säugling'], ['jungtier', 'Jungtier'], ['adult', 'Erwachsen']];
+  const APPLIKATION = [['oral', 'oral'], ['sc', 's.c. (unter die Haut)'], ['im', 'i.m. (in den Muskel)'], ['topisch', 'äußerlich'], ['sonstiges', 'sonstiges']];
+  const PARASITEN = ['negativ', 'Crenosoma (Lungenwurm)', 'Capillaria aerophila (Lungenhaarwurm)', 'Capillaria spp. (Darmhaarwurm)', 'Brachylaemus (Saugwurm)', 'Bandwürmer', 'Kokzidien', 'Hefen/Pilze'];
+  const BEFALL = [['', '–'], ['gering', 'gering'], ['mittel', 'mittel'], ['stark', 'stark']];
+  const GEFRESSEN = [['alles', 'alles'], ['fast', 'fast alles'], ['haelfte', 'etwa die Hälfte'], ['wenig', 'wenig'], ['nichts', 'nichts'], ['offen', 'nicht kontrolliert']];
+  const FUTTER_VORSCHLAEGE = ['Katzenfutter (Nass)', 'Katzen-Trockenfutter', 'Igel-Trockenfutter', 'Rührei (ungewürzt)', 'Hähnchen gekocht', 'Insekten', 'Aufzuchtmilch'];
+  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, lastBackup: null };
+
+  // ---------- Zustand ----------
+  let db;
+  const D = {}; DATA_STORES.forEach((s) => (D[s] = []));
+  let S = { ...DEFAULTS };
+  const ui = { route: { name: 'list' }, prev: null, filter: 'aktiv', search: '', detailTab: 'uebersicht', futterAlle: false };
+  const urlCache = new Map();
+
+  // ---------- Hilfsfunktionen ----------
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+  const pad = (n) => String(n).padStart(2, '0');
+  const dStr = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const dtStr = (d) => `${dStr(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const today = () => dStr(new Date());
+  const nowDT = () => dtStr(new Date());
+  function parseD(s) {
+    if (!s) return null;
+    const [y, m, d, hh = '0', mm = '0'] = String(s).split(/[-T:]/);
+    return new Date(+y, +m - 1, +d, +hh, +mm);
+  }
+  const fmtD = (s) => { const d = parseD(s); return d ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}` : ''; };
+  const fmtDT = (s) => { const d = parseD(s); if (!d) return ''; return String(s).includes('T') ? `${fmtD(s)}, ${pad(d.getHours())}:${pad(d.getMinutes())}` : fmtD(s); };
+  const fmtShort = (s) => { const d = parseD(s); return d ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.` : ''; };
+  const dayOf = (s) => String(s || '').slice(0, 10);
+  function daysBetween(a, b) {
+    const da = parseD(dayOf(a)), dbb = parseD(dayOf(b));
+    if (!da || !dbb) return null;
+    return Math.round((dbb - da) / 864e5);
+  }
+  function addDays(s, n) { const d = parseD(s); d.setDate(d.getDate() + n); return dStr(d); }
+  const num = (v) => { if (v === '' || v == null) return null; const n = parseFloat(String(v).replace(',', '.')); return isNaN(n) ? null : n; };
+  const fmtNum = (n, digits = 0) => (n == null ? '' : n.toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits }));
+  const signed = (n, digits = 0) => (n == null ? '–' : (n > 0 ? '+' : n < 0 ? '−' : '±') + fmtNum(Math.abs(n), digits));
+  const label = (list, v) => (list.find((x) => x[0] === v) || [, v || ''])[1];
+  const opts = (list) => list.map(([v, l]) => ({ v, l }));
+
+  function toast(msg, ms = 2200) {
+    const t = $('#toast'); t.textContent = msg; t.hidden = false;
+    clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms);
+  }
+
+  // ---------- Datenbank ----------
+  function openDB() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('igelpflege', 1);
+      r.onupgradeneeded = () => {
+        const d = r.result;
+        for (const s of STORES) {
+          if (!d.objectStoreNames.contains(s)) {
+            const os = d.createObjectStore(s, { keyPath: 'id' });
+            if (s !== 'igel' && s !== 'settings') os.createIndex('igelId', 'igelId');
+          }
+        }
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  const txDone = (t) => new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
+  function dbAll(store) {
+    return new Promise((res, rej) => { const r = db.transaction(store).objectStore(store).getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  }
+  async function save(store, obj) {
+    if (!obj.id) { obj.id = uid(); obj.createdAt = new Date().toISOString(); }
+    obj.updatedAt = new Date().toISOString();
+    const t = db.transaction(store, 'readwrite'); t.objectStore(store).put(obj); await txDone(t);
+    if (D[store]) { const i = D[store].findIndex((x) => x.id === obj.id); if (i >= 0) D[store][i] = obj; else D[store].push(obj); }
+    return obj;
+  }
+  async function removeMany(store, ids) {
+    if (!ids.length) return;
+    const t = db.transaction(store, 'readwrite'); const os = t.objectStore(store); ids.forEach((id) => os.delete(id)); await txDone(t);
+    const set = new Set(ids); D[store] = D[store].filter((x) => !set.has(x.id));
+    if (store === 'fotos') ids.forEach(dropUrl);
+  }
+  const remove = (store, id) => removeMany(store, [id]);
+  async function saveSettings() { const t = db.transaction('settings', 'readwrite'); t.objectStore('settings').put(S); await txDone(t); }
+  async function loadAll() {
+    for (const s of DATA_STORES) D[s] = await dbAll(s);
+    const st = (await dbAll('settings')).find((x) => x.id === 'main');
+    S = { ...DEFAULTS, ...(st || {}) };
+  }
+  async function deleteIgel(id) {
+    for (const s of DATA_STORES) {
+      if (s === 'igel') continue;
+      await removeMany(s, D[s].filter((x) => x.igelId === id).map((x) => x.id));
+    }
+    await remove('igel', id);
+  }
+
+  // ---------- Datenzugriff ----------
+  const igelById = (id) => D.igel.find((x) => x.id === id);
+  const igelName = (i) => (i ? (i.name || (i.nummer ? `Igel Nr. ${i.nummer}` : 'Igel ohne Namen')) : '?');
+  const byIgel = (store, id) => D[store].filter((x) => x.igelId === id);
+  const weightsOf = (id) => byIgel('gewichte', id).sort((a, b) => a.datum.localeCompare(b.datum));
+  const lastWeight = (id) => { const w = weightsOf(id); return w.length ? w[w.length - 1] : null; };
+  const firstWeight = (id) => weightsOf(id)[0] || null;
+  function trend(id, days = 7) {
+    const ws = weightsOf(id); if (ws.length < 2) return null;
+    const last = ws[ws.length - 1];
+    const cutoff = parseD(last.datum).getTime() - days * 864e5;
+    let ref = null;
+    for (const w of ws) { if (parseD(w.datum).getTime() <= cutoff) ref = w; }
+    if (!ref) ref = ws[0];
+    const span = (parseD(last.datum) - parseD(ref.datum)) / 864e5;
+    if (span < 0.5) return null;
+    return (last.gramm - ref.gramm) / span;
+  }
+  const photosOf = (id) => byIgel('fotos', id).sort((a, b) => (a.datum || '').localeCompare(b.datum || ''));
+  function titlePhoto(igel) {
+    const ps = photosOf(igel.id); if (!ps.length) return null;
+    return ps.find((p) => p.id === igel.titelFotoId) || ps[ps.length - 1];
+  }
+  function photoUrl(p, full = false) {
+    if (!p) return '';
+    const key = p.id + (full ? ':f' : ':t');
+    if (!urlCache.has(key)) urlCache.set(key, URL.createObjectURL(new Blob([full ? p.full : p.thumb], { type: p.type || 'image/jpeg' })));
+    return urlCache.get(key);
+  }
+  function dropUrl(id) { for (const k of [id + ':f', id + ':t']) { if (urlCache.has(k)) { URL.revokeObjectURL(urlCache.get(k)); urlCache.delete(k); } } }
+  const inCareDays = (i) => { const end = ACTIVE.has(i.status) ? today() : (i.abgangDatum || today()); return daysBetween(i.aufnahmeDatum, end); };
+
+  function medActiveOn(m, day) {
+    if (!m.start || m.start > day) return false;
+    if (m.tage) { const ende = addDays(m.start, m.tage - 1); if (day > ende) return false; }
+    return !m.abgesetzt;
+  }
+  const medEnde = (m) => (m.tage ? addDays(m.start, m.tage - 1) : null);
+  const gabenOn = (medId, day) => D.gaben.filter((g) => g.medId === medId && dayOf(g.zeit) === day).sort((a, b) => a.zeit.localeCompare(b.zeit));
+
+  // ---------- "Heute fällig" ----------
+  function dueItems() {
+    const t = today();
+    const soon = addDays(t, 3);
+    const active = D.igel.filter((i) => ACTIVE.has(i.status));
+    const meds = [], wiegen = [], termine = [], kontrollen = [], futter = [];
+    for (const i of active) {
+      for (const m of byIgel('medikation', i.id)) {
+        if (!medActiveOn(m, t)) continue;
+        const done = gabenOn(m.id, t).length;
+        meds.push({ igel: i, med: m, done, soll: m.proTag || 1 });
+      }
+      const lw = lastWeight(i.id);
+      const intervall = i.status === 'winterschlaf' ? S.wiegenTageWinter : S.wiegenTage;
+      const seit = lw ? daysBetween(lw.datum, t) : null;
+      if (!lw || seit >= intervall) wiegen.push({ igel: i, seit, lw });
+
+      const visits = byIgel('tierarzt', i.id);
+      for (const v of visits) {
+        if (!v.naechsterTermin || v.naechsterTermin > soon) continue;
+        if (visits.some((x) => x.id !== v.id && x.datum >= v.naechsterTermin)) continue;
+        termine.push({ igel: i, v, over: v.naechsterTermin < t, heute: v.naechsterTermin === t });
+      }
+      const bef = byIgel('befunde', i.id);
+      for (const b of bef) {
+        if (!b.kontrolleAm || b.kontrolleAm > soon) continue;
+        if (bef.some((x) => x.id !== b.id && x.datum >= b.kontrolleAm)) continue;
+        kontrollen.push({ igel: i, b, over: b.kontrolleAm < t, heute: b.kontrolleAm === t });
+      }
+      if (i.status !== 'winterschlaf' && !byIgel('futter', i.id).some((f) => dayOf(f.datum) === t)) futter.push({ igel: i });
+    }
+    const offeneMeds = meds.filter((x) => x.done < x.soll).length;
+    const count = offeneMeds + wiegen.length + termine.filter((x) => x.over || x.heute).length + kontrollen.filter((x) => x.over || x.heute).length;
+    return { meds, wiegen, termine, kontrollen, futter, count };
+  }
+  function updateBadge() {
+    const n = dueItems().count; const b = $('#badgeHeute');
+    b.hidden = !n; b.textContent = n > 99 ? '99+' : n;
+  }
+
+  // ---------- Navigation ----------
+  function go(route, opts2 = {}) {
+    if (opts2.keepPrev !== true) ui.prev = ui.route;
+    ui.route = route;
+    if (route.name === 'detail' && !opts2.keepTab) { ui.detailTab = 'uebersicht'; ui.futterAlle = false; }
+    window.scrollTo(0, 0);
+    render();
+  }
+  function back() {
+    const p = ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' };
+    ui.prev = null; go(p, { keepPrev: true });
+  }
+  function setHeader(title, { back: showBack = false, action = null } = {}) {
+    $('#title').textContent = title;
+    $('#btnBack').hidden = !showBack;
+    const a = $('#btnAction');
+    if (action) { a.hidden = false; a.textContent = action.label; a.onclick = action.fn; a.setAttribute('aria-label', action.aria || action.label); }
+    else { a.hidden = true; a.onclick = null; }
+  }
+  function setTab(name) { $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name)); }
+
+  function render() {
+    const r = ui.route;
+    const view = $('#view');
+    if (r.name === 'list') { setTab('igel'); view.innerHTML = viewList(); }
+    else if (r.name === 'detail') {
+      const i = igelById(r.id);
+      if (!i) { ui.route = { name: 'list' }; return render(); }
+      setTab(ui.prev && ui.prev.name === 'heute' ? 'heute' : 'igel');
+      view.innerHTML = viewDetail(i);
+    }
+    else if (r.name === 'heute') { setTab('heute'); view.innerHTML = viewHeute(); }
+    else if (r.name === 'einstellungen') { setTab('einstellungen'); view.innerHTML = viewSettings(); fillStorageInfo(); }
+    updateBadge();
+  }
+
+  // ---------- Ansicht: Liste ----------
+  function viewList() {
+    setHeader('Igel', { action: { label: '＋', aria: 'Igel aufnehmen', fn: () => igelForm() } });
+    const q = ui.search.trim().toLowerCase();
+    let list = D.igel.filter((i) => ui.filter === 'alle' || (ui.filter === 'aktiv' ? ACTIVE.has(i.status) : !ACTIVE.has(i.status)));
+    if (q) list = list.filter((i) => [i.name, i.nummer, i.fundOrt, i.finderName].some((v) => String(v || '').toLowerCase().includes(q)));
+    list.sort((a, b) => (b.aufnahmeDatum || '').localeCompare(a.aufnahmeDatum || '') || igelName(a).localeCompare(igelName(b)));
+    const cntA = D.igel.filter((i) => ACTIVE.has(i.status)).length;
+    let html = `
+      <div class="seg">
+        ${[['aktiv', `In Pflege (${cntA})`], ['abgeschlossen', 'Abgeschlossen'], ['alle', 'Alle']].map(([v, l]) => `<button data-act="filter" data-v="${v}" class="${ui.filter === v ? 'active' : ''}">${l}</button>`).join('')}
+      </div>
+      <div class="toolbar"><input class="search" id="search" type="search" placeholder="Suchen (Name, Nr., Fundort, Finder)" value="${esc(ui.search)}" autocomplete="off"></div>`;
+    if (!D.igel.length) {
+      return html + `<div class="empty"><div class="big">🦔</div><p>Noch keine Igel erfasst.</p><button class="btn" data-act="newIgel" style="max-width:260px">Ersten Igel aufnehmen</button></div>`;
+    }
+    if (!list.length) return html + `<div class="empty">Keine Treffer.</div>`;
+    html += `<div class="list">` + list.map((i) => {
+      const p = titlePhoto(i); const lw = lastWeight(i.id); const tr = trend(i.id);
+      const sub = [i.nummer ? `Nr. ${esc(i.nummer)}` : '', lw ? `${fmtNum(lw.gramm)} g` : 'kein Gewicht', tr != null ? `<span class="${tr >= 0 ? 'up' : 'down'}">${signed(tr, 1)} g/Tag</span>` : ''].filter(Boolean).join(' · ');
+      const tage = inCareDays(i);
+      return `<button class="row" data-act="open" data-id="${i.id}">
+        ${p ? `<img class="thumb" src="${photoUrl(p)}" alt="">` : `<span class="thumb">🦔</span>`}
+        <span class="grow"><span class="t">${esc(igelName(i))}</span> <span class="chip ${i.status}">${esc(STATUS_L[i.status] || i.status)}</span><br><span class="s">${sub}</span></span>
+        <span class="r">${tage != null ? `${tage} T` : ''}</span><span class="chev">›</span>
+      </button>`;
+    }).join('') + `</div>`;
+    return html;
+  }
+
+  // ---------- Ansicht: Detail ----------
+  function viewDetail(i) {
+    setHeader(igelName(i), { back: true, action: { label: 'Bearbeiten', fn: () => igelForm(i) } });
+    const tabs = [['uebersicht', 'Übersicht'], ['gewicht', 'Gewicht'], ['medizin', 'Medizin'], ['futter', 'Futter']];
+    let html = `<div class="seg">${tabs.map(([v, l]) => `<button data-act="dtab" data-v="${v}" class="${ui.detailTab === v ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+    if (ui.detailTab === 'uebersicht') html += detailUebersicht(i);
+    if (ui.detailTab === 'gewicht') html += detailGewicht(i);
+    if (ui.detailTab === 'medizin') html += detailMedizin(i);
+    if (ui.detailTab === 'futter') html += detailFutter(i);
+    return html;
+  }
+
+  function statsHtml(i) {
+    const lw = lastWeight(i.id), fw = firstWeight(i.id), tr = trend(i.id);
+    const diff = lw && fw && lw !== fw ? lw.gramm - fw.gramm : null;
+    return `<div class="stats">
+      <div class="stat"><div class="v">${lw ? fmtNum(lw.gramm) + ' g' : '–'}</div><div class="l">Aktuell${lw ? ' · ' + fmtShort(lw.datum) : ''}</div></div>
+      <div class="stat"><div class="v ${diff > 0 ? 'up' : diff < 0 ? 'down' : ''}">${diff != null ? signed(diff) + ' g' : '–'}</div><div class="l">seit Aufnahme</div></div>
+      <div class="stat"><div class="v ${tr > 0 ? 'up' : tr < 0 ? 'down' : ''}">${tr != null ? signed(tr, 1) : '–'}</div><div class="l">g/Tag (7 Tage)</div></div>
+    </div>`;
+  }
+
+  function detailUebersicht(i) {
+    const p = titlePhoto(i); const ps = photosOf(i.id);
+    const tage = inCareDays(i);
+    const kv = [
+      ['Pflege-Nr.', i.nummer], ['Geschlecht', label(GESCHLECHT, i.geschlecht)], ['Alter', label(ALTER, i.alter)],
+      ['Aufnahme', fmtD(i.aufnahmeDatum)], ['Fund am', fmtD(i.fundDatum)], ['Fundort', i.fundOrt], ['Fundumstände', i.fundUmstaende],
+      ['Finder', i.finderName], ['Kontakt Finder', i.finderKontakt], ['Zustand bei Aufnahme', i.zustand],
+      ['Abgang am', fmtD(i.abgangDatum)], ['Verbleib / Ort', i.abgangOrt], ['Notizen', i.notizen]
+    ].filter(([, v]) => v && v !== 'unbekannt' || false);
+    return `
+      <div class="card">
+        <div class="hero">
+          ${p ? `<img class="avatar" src="${photoUrl(p)}" alt="" data-act="photo" data-id="${p.id}">` : `<span class="avatar">🦔</span>`}
+          <div><h2>${esc(igelName(i))}</h2>
+            <span class="chip ${i.status}">${esc(STATUS_L[i.status])}</span>
+            <div class="meta">${tage != null ? `${tage} ${tage === 1 ? 'Tag' : 'Tage'} in Pflege` : ''}</div></div>
+        </div>
+        ${statsHtml(i)}
+      </div>
+      <div class="section-title">Fotos (${ps.length})</div>
+      <div class="gallery">
+        <button class="add" data-act="addPhoto" data-id="${i.id}">📷<br>Foto hinzufügen</button>
+        ${ps.slice().reverse().map((f) => `<img src="${photoUrl(f)}" alt="" data-act="photo" data-id="${f.id}">`).join('')}
+      </div>
+      <div class="section-title">Daten</div>
+      <div class="card">${kv.length ? `<dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : '<span class="note">Keine weiteren Daten.</span>'}</div>
+      <div class="btn-row">
+        <button class="btn secondary" data-act="pdf" data-id="${i.id}">📄 Pflegeprotokoll (PDF)</button>
+        <button class="btn danger" data-act="delIgel" data-id="${i.id}">Igel löschen</button>
+      </div>`;
+  }
+
+  function detailGewicht(i) {
+    const ws = weightsOf(i.id);
+    const rows = ws.slice().reverse().map((w, idx, arr) => {
+      const prev = arr[idx + 1];
+      const d = prev ? w.gramm - prev.gramm : null;
+      return `<button class="row" data-act="editWeight" data-id="${w.id}">
+        <span class="grow"><span class="t">${fmtNum(w.gramm)} g</span>${d != null ? ` <span class="${d >= 0 ? 'up' : 'down'}">${signed(d)} g</span>` : ''}<br><span class="s">${fmtDT(w.datum)}${w.notiz ? ' · ' + esc(w.notiz) : ''}</span></span><span class="chev">›</span></button>`;
+    }).join('');
+    return `
+      <div class="card">${statsHtml(i)}<div style="margin-top:12px">${chartSvg(ws)}</div></div>
+      <button class="btn" data-act="addWeight" data-id="${i.id}">⚖️ Wiegen</button>
+      <div class="section-title">Wiegeprotokoll (${ws.length})</div>
+      ${ws.length ? `<div class="list">${rows}</div>` : '<div class="empty">Noch keine Wiegung eingetragen.</div>'}`;
+  }
+
+  function detailMedizin(i) {
+    const t = today();
+    const meds = byIgel('medikation', i.id).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+    const aktiv = meds.filter((m) => medActiveOn(m, t) || (m.start > t && !m.abgesetzt));
+    const alt = meds.filter((m) => !aktiv.includes(m));
+    const medRow = (m) => {
+      const ende = medEnde(m);
+      const g = gabenOn(m.id, t).length; const soll = m.proTag || 1;
+      const isActive = medActiveOn(m, t);
+      return `<button class="row" data-act="editMed" data-id="${m.id}">
+        <span class="grow"><span class="t">${esc(m.mittel)}</span> <span class="s">${esc(m.dosis)} · ${esc(label(APPLIKATION, m.applikation))} · ${soll}× tägl.</span><br>
+        <span class="s">${fmtD(m.start)} – ${m.abgesetzt ? 'abgesetzt ' + fmtD(m.abgesetzt) : ende ? fmtD(ende) : 'offen'}${m.grund ? ' · ' + esc(m.grund) : ''}</span></span>
+        ${isActive ? `<span class="r ${g >= soll ? 'done-mark' : 'progress'}">${g}/${soll} heute</span>` : ''}<span class="chev">›</span></button>`;
+    };
+    const bef = byIgel('befunde', i.id).sort((a, b) => b.datum.localeCompare(a.datum));
+    const ta = byIgel('tierarzt', i.id).sort((a, b) => b.datum.localeCompare(a.datum));
+    return `
+      <div class="section-title">Aktuelle Medikation <button class="link" data-act="addMed" data-id="${i.id}">＋ Neu</button></div>
+      ${aktiv.length ? `<div class="list">${aktiv.map(medRow).join('')}</div>` : '<div class="card note">Keine laufende Medikation.</div>'}
+      ${aktiv.filter((m) => medActiveOn(m, t)).length ? `<div class="btn-row" style="margin-bottom:12px">${aktiv.filter((m) => medActiveOn(m, t)).map((m) => `<button class="btn small secondary" data-act="give" data-id="${m.id}">✓ ${esc(m.mittel)} gegeben</button>`).join('')}</div>` : ''}
+      ${alt.length ? `<div class="section-title">Frühere Medikation</div><div class="list">${alt.map(medRow).join('')}</div>` : ''}
+
+      <div class="section-title">Kotproben / Parasiten <button class="link" data-act="addBefund" data-id="${i.id}">＋ Neu</button></div>
+      ${bef.length ? `<div class="list">${bef.map((b) => `<button class="row" data-act="editBefund" data-id="${b.id}">
+        <span class="grow"><span class="t">${fmtD(b.datum)}</span>${b.befall ? ` <span class="chip">${esc(b.befall)}</span>` : ''}<br>
+        <span class="s">${esc((b.ergebnis || []).join(', ') || 'kein Ergebnis eingetragen')}${b.kontrolleAm ? ' · Kontrolle ' + fmtD(b.kontrolleAm) : ''}</span></span><span class="chev">›</span></button>`).join('')}</div>` : '<div class="card note">Noch keine Kotprobe eingetragen.</div>'}
+
+      <div class="section-title">Tierarzt <button class="link" data-act="addVet" data-id="${i.id}">＋ Neu</button></div>
+      ${ta.length ? `<div class="list">${ta.map((v) => `<button class="row" data-act="editVet" data-id="${v.id}">
+        <span class="grow"><span class="t">${fmtD(v.datum)}</span> <span class="s">${esc(v.praxis || '')}</span><br>
+        <span class="s">${esc(v.grund || '')}${v.diagnose ? ' · ' + esc(v.diagnose) : ''}${v.naechsterTermin ? ' · nächster Termin ' + fmtD(v.naechsterTermin) : ''}</span></span>
+        ${v.kosten != null ? `<span class="r">${fmtNum(v.kosten, 2)} €</span>` : ''}<span class="chev">›</span></button>`).join('')}</div>` : '<div class="card note">Noch kein Tierarztbesuch eingetragen.</div>'}`;
+  }
+
+  function detailFutter(i) {
+    const fs = byIgel('futter', i.id).sort((a, b) => b.datum.localeCompare(a.datum));
+    const shown = ui.futterAlle ? fs : fs.slice(0, 40);
+    return `
+      <button class="btn" data-act="addFutter" data-id="${i.id}">🍽️ Fütterung eintragen</button>
+      <div class="section-title">Futterprotokoll (${fs.length})</div>
+      ${fs.length ? `<div class="list">${shown.map((f) => `<button class="row" data-act="editFutter" data-id="${f.id}">
+        <span class="grow"><span class="t">${esc(f.futter || 'Futter')}</span>${f.menge != null ? ` <span class="s">${fmtNum(f.menge)} g</span>` : ''}<br>
+        <span class="s">${fmtDT(f.datum)} · gefressen: ${esc(label(GEFRESSEN, f.gefressen))}${f.notiz ? ' · ' + esc(f.notiz) : ''}</span></span><span class="chev">›</span></button>`).join('')}</div>
+        ${fs.length > shown.length ? `<button class="btn secondary" data-act="futterAlle">Alle ${fs.length} Einträge anzeigen</button>` : ''}` : '<div class="empty">Noch keine Fütterung eingetragen.</div>'}`;
+  }
+
+  // ---------- Diagramm ----------
+  function niceStep(raw) {
+    const p = Math.pow(10, Math.floor(Math.log10(raw)));
+    const f = raw / p;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+  }
+  function chartScale(ws, ziel) {
+    const xs = ws.map((w) => parseD(w.datum).getTime()); const ys = ws.map((w) => w.gramm);
+    let ymin = Math.min(...ys), ymax = Math.max(...ys);
+    if (ziel) { ymin = Math.min(ymin, ziel); ymax = Math.max(ymax, ziel); }
+    const step = niceStep(Math.max(ymax - ymin, 40) / 4);
+    ymin = Math.floor(ymin / step) * step; ymax = Math.ceil(ymax / step) * step;
+    if (ymax === ymin) ymax += step;
+    let xmin = Math.min(...xs), xmax = Math.max(...xs);
+    if (xmax - xmin < 864e5) xmax = xmin + 864e5;
+    return { xs, ys, xmin, xmax, ymin, ymax, step };
+  }
+  function chartSvg(ws) {
+    if (ws.length < 2) return '<p class="note">Ab zwei Wiegungen erscheint hier der Gewichtsverlauf.</p>';
+    const W = 340, H = 190, L = 40, R = 10, T = 12, B = 24;
+    const ziel = S.zielgewicht || null;
+    const sc = chartScale(ws, ziel);
+    const X = (x) => L + (x - sc.xmin) / (sc.xmax - sc.xmin) * (W - L - R);
+    const Y = (y) => T + (1 - (y - sc.ymin) / (sc.ymax - sc.ymin)) * (H - T - B);
+    let g = '';
+    for (let v = sc.ymin; v <= sc.ymax + 0.001; v += sc.step) g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 5}" y="${Y(v) + 3}" text-anchor="end">${fmtNum(v)}</text>`;
+    const nx = 4;
+    for (let k = 0; k <= nx; k++) {
+      const x = sc.xmin + (sc.xmax - sc.xmin) * k / nx;
+      g += `<text x="${X(x)}" y="${H - 6}" text-anchor="${k === 0 ? 'start' : k === nx ? 'end' : 'middle'}">${fmtShort(dtStr(new Date(x)))}</text>`;
+    }
+    const pts = sc.xs.map((x, k) => [X(x), Y(sc.ys[k])]);
+    const path = pts.map((p, k) => (k ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('');
+    const area = path + `L${pts[pts.length - 1][0].toFixed(1)},${Y(sc.ymin)}L${pts[0][0].toFixed(1)},${Y(sc.ymin)}Z`;
+    const zielLine = ziel ? `<line class="ziel" x1="${L}" x2="${W - R}" y1="${Y(ziel)}" y2="${Y(ziel)}"/><text class="ziel-t" x="${W - R}" y="${Y(ziel) - 4}" text-anchor="end">Ziel ${fmtNum(ziel)} g</text>` : '';
+    const dots = pts.length <= 60 ? pts.map((p) => `<circle class="dot" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3"/>`).join('') : '';
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Gewichtsverlauf">${g}<path class="area" d="${area}"/>${zielLine}<path class="line" d="${path}"/>${dots}</svg>`;
+  }
+
+  // ---------- Ansicht: Heute ----------
+  function viewHeute() {
+    setHeader('Heute');
+    const d = dueItems(); const t = today();
+    let html = '';
+    const backupAlt = !S.lastBackup || daysBetween(S.lastBackup, t) >= 7;
+    if (D.igel.length && backupAlt) html += `<div class="hint">💾 ${S.lastBackup ? `Letztes Backup vor ${daysBetween(S.lastBackup, t)} Tagen.` : 'Noch kein Backup erstellt.'} <button class="link" data-act="backup">Jetzt sichern</button></div>`;
+
+    const igelLink = (i) => `<button class="link" data-act="open" data-id="${i.id}">${esc(igelName(i))}</button>`;
+
+    html += `<div class="section-title">Medikamente</div>`;
+    if (d.meds.length) {
+      d.meds.sort((a, b) => (a.done >= a.soll) - (b.done >= b.soll) || igelName(a.igel).localeCompare(igelName(b.igel)));
+      html += `<div class="list">${d.meds.map(({ igel, med, done, soll }) => `
+        <div class="row ${done < soll ? 'due' : ''}">
+          <span class="grow">${igelLink(igel)}<br><span class="t">${esc(med.mittel)}</span> <span class="s">${esc(med.dosis)} · ${esc(label(APPLIKATION, med.applikation))}</span>
+          ${done ? `<br><span class="s">gegeben: ${gabenOn(med.id, t).map((g) => fmtDT(g.zeit).split(', ')[1]).join(', ')} · <button class="link" data-act="undoGive" data-id="${med.id}">rückgängig</button></span>` : ''}</span>
+          <span class="r"><span class="${done >= soll ? 'done-mark' : 'progress'}">${done}/${soll}</span><br>
+          ${done < soll ? `<button class="btn small" data-act="give" data-id="${med.id}">✓ Gegeben</button>` : ''}</span>
+        </div>`).join('')}</div>`;
+    } else html += `<div class="card note">Heute keine Medikamente fällig.</div>`;
+
+    html += `<div class="section-title">Wiegen fällig</div>`;
+    if (d.wiegen.length) {
+      html += `<div class="list">${d.wiegen.map(({ igel, seit, lw }) => `
+        <div class="row due"><span class="grow">${igelLink(igel)}<br><span class="s">${lw ? `zuletzt ${fmtNum(lw.gramm)} g, vor ${seit} ${seit === 1 ? 'Tag' : 'Tagen'}` : 'noch nie gewogen'}</span></span>
+        <button class="btn small" data-act="addWeight" data-id="${igel.id}">⚖️ Wiegen</button></div>`).join('')}</div>`;
+    } else html += `<div class="card note">Alle Igel sind aktuell gewogen.</div>`;
+
+    if (d.termine.length || d.kontrollen.length) {
+      html += `<div class="section-title">Termine (nächste 3 Tage)</div><div class="list">`;
+      html += d.termine.map(({ igel, v, over, heute }) => `<div class="row due ${over ? 'over' : ''}"><span class="grow">${igelLink(igel)}<br><span class="s">🩺 Tierarzt ${over ? 'überfällig seit' : heute ? 'heute,' : 'am'} ${fmtD(v.naechsterTermin)}${v.praxis ? ' · ' + esc(v.praxis) : ''}</span></span></div>`).join('');
+      html += d.kontrollen.map(({ igel, b, over, heute }) => `<div class="row due ${over ? 'over' : ''}"><span class="grow">${igelLink(igel)}<br><span class="s">🔬 Kontroll-Kotprobe ${over ? 'überfällig seit' : heute ? 'heute,' : 'am'} ${fmtD(b.kontrolleAm)}</span></span></div>`).join('');
+      html += `</div>`;
+    }
+
+    html += `<div class="section-title">Fütterung heute noch nicht eingetragen</div>`;
+    if (d.futter.length) {
+      html += `<div class="list">${d.futter.map(({ igel }) => `<div class="row"><span class="grow">${igelLink(igel)}</span><button class="btn small secondary" data-act="addFutter" data-id="${igel.id}">🍽️ Eintragen</button></div>`).join('')}</div>`;
+    } else html += `<div class="card note">${D.igel.some((i) => ACTIVE.has(i.status)) ? 'Für alle Igel ist heute eine Fütterung eingetragen.' : 'Zurzeit keine Igel in Pflege.'}</div>`;
+    return html;
+  }
+
+  // ---------- Ansicht: Einstellungen ----------
+  function viewSettings() {
+    setHeader('Einstellungen');
+    const counts = DATA_STORES.reduce((a, s) => ((a[s] = D[s].length), a), {});
+    return `
+      <div class="section-title">Pflegestelle (erscheint im PDF)</div>
+      <div class="form">
+        <label class="field"><span>Name der Pflegestelle</span><input id="s_pflegestelle" value="${esc(S.pflegestelle)}"></label>
+        <label class="field"><span>Ansprechpartner</span><input id="s_ansprechpartner" value="${esc(S.ansprechpartner)}"></label>
+        <label class="field"><span>Kontakt (Telefon / E-Mail)</span><input id="s_kontakt" value="${esc(S.kontakt)}"></label>
+      </div>
+      <div class="section-title">Gewicht & Erinnerungen</div>
+      <div class="form">
+        <label class="field"><span>Zielgewicht in g (Linie im Diagramm, leer = keine)</span><input id="s_zielgewicht" inputmode="numeric" value="${esc(S.zielgewicht ?? '')}"></label>
+        <label class="field"><span>Wiegen fällig nach … Tagen</span><input id="s_wiegenTage" inputmode="numeric" value="${esc(S.wiegenTage)}"></label>
+        <label class="field"><span>Im Winterschlaf: Wiegen fällig nach … Tagen</span><input id="s_wiegenTageWinter" inputmode="numeric" value="${esc(S.wiegenTageWinter)}"></label>
+      </div>
+      <button class="btn" data-act="saveSettings">Einstellungen speichern</button>
+
+      <div class="section-title">Datensicherung</div>
+      <div class="card">
+        <p class="note" style="margin-top:0">Alle Daten liegen nur auf diesem Gerät. Wird die App vom Home-Bildschirm entfernt, sind die Daten weg. Sichere regelmäßig ein Backup, z. B. in „Dateien“ / iCloud Drive.</p>
+        <p class="note">Letztes Backup: <strong>${S.lastBackup ? fmtD(S.lastBackup) : 'noch keins'}</strong></p>
+        <div class="btn-row">
+          <button class="btn" data-act="backup">💾 Backup erstellen</button>
+          <button class="btn secondary" data-act="restore">Backup einspielen</button>
+        </div>
+        <input type="file" id="restoreFile" accept=".json,application/json" hidden>
+      </div>
+
+      <div class="section-title">Speicher</div>
+      <div class="card"><dl class="kv">
+        <dt>Igel</dt><dd>${counts.igel}</dd><dt>Wiegungen</dt><dd>${counts.gewichte}</dd><dt>Fotos</dt><dd>${counts.fotos}</dd>
+        <dt>Medikationen / Gaben</dt><dd>${counts.medikation} / ${counts.gaben}</dd><dt>Kotproben</dt><dd>${counts.befunde}</dd>
+        <dt>Tierarztbesuche</dt><dd>${counts.tierarzt}</dd><dt>Fütterungen</dt><dd>${counts.futter}</dd>
+        <dt>Belegt</dt><dd id="storageUsed">…</dd><dt>Dauerhaft</dt><dd id="storagePersist">…</dd>
+      </dl></div>
+
+      <div class="section-title">Gefahrenzone</div>
+      <button class="btn danger" data-act="wipe">Alle Daten löschen</button>
+      <p class="note" style="text-align:center;margin-top:20px">Igelpflege ${VERSION} · Daten verlassen dieses Gerät nur, wenn du sie selbst teilst.</p>`;
+  }
+  async function fillStorageInfo() {
+    try {
+      if (navigator.storage?.estimate) { const e = await navigator.storage.estimate(); const el = $('#storageUsed'); if (el) el.textContent = `${fmtNum((e.usage || 0) / 1048576, 1)} MB`; }
+      const p = navigator.storage?.persisted ? await navigator.storage.persisted() : null; const el2 = $('#storagePersist'); if (el2) el2.textContent = p == null ? 'unbekannt' : p ? 'ja' : 'nein (Backup wichtig)';
+    } catch (e) { /* ignorieren */ }
+  }
+
+  // ---------- Sheet / Formulare ----------
+  function openSheet({ title, body, saveLabel = 'Sichern', onSave = null, cancelLabel = 'Abbrechen', onOpen = null }) {
+    const sh = $('#sheet');
+    sh.innerHTML = `<div class="sheet-head"><button class="cancel" data-sheet="cancel">${esc(cancelLabel)}</button><h3>${esc(title)}</h3>${onSave ? `<button class="save" data-sheet="save">${esc(saveLabel)}</button>` : ''}</div>${body}`;
+    sh.hidden = false; $('#sheetBackdrop').hidden = false;
+    document.body.style.overflow = 'hidden';
+    sh.scrollTop = 0;
+    sh._onSave = onSave;
+    if (onOpen) onOpen(sh);
+  }
+  function closeSheet() { const sh = $('#sheet'); sh.hidden = true; sh.innerHTML = ''; sh._onSave = null; sh._onDelete = null; sh._share = null; $('#sheetBackdrop').hidden = true; document.body.style.overflow = ''; }
+
+  function fieldHtml(f, v) {
+    const id = 'f_' + f.key;
+    const req = f.required ? ' <span class="req">*</span>' : '';
+    const val = v ?? f.default ?? '';
+    let input;
+    switch (f.type) {
+      case 'textarea': input = `<textarea id="${id}" rows="3">${esc(val)}</textarea>`; break;
+      case 'select': input = `<select id="${id}">${f.options.map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`; break;
+      case 'checks': {
+        const arr = Array.isArray(val) ? val : [];
+        input = `<div class="checks" id="${id}">${f.options.map((o) => `<label><input type="checkbox" value="${esc(o)}"${arr.includes(o) ? ' checked' : ''}>${esc(o)}</label>`).join('')}</div>`; break;
+      }
+      case 'number': input = `<input id="${id}" type="text" inputmode="decimal" value="${esc(val === '' || val == null ? '' : String(val).replace('.', ','))}" placeholder="${esc(f.placeholder || '')}">`; break;
+      case 'date': input = `<input id="${id}" type="date" value="${esc(val)}">`; break;
+      case 'datetime': input = `<input id="${id}" type="datetime-local" value="${esc(val)}">`; break;
+      default: input = `<input id="${id}" type="${f.type === 'tel' ? 'tel' : 'text'}" value="${esc(val)}" placeholder="${esc(f.placeholder || '')}"${f.list ? ` list="${id}_l"` : ''} autocomplete="off">${f.list ? `<datalist id="${id}_l">${f.list.map((x) => `<option value="${esc(x)}">`).join('')}</datalist>` : ''}`;
+    }
+    return `<label class="field"><span>${esc(f.label)}${req}</span>${input}</label>`;
+  }
+  function readField(f) {
+    const el = $('#f_' + f.key);
+    if (!el) return undefined;
+    if (f.type === 'checks') return $$('input:checked', el).map((x) => x.value);
+    if (f.type === 'number') return num(el.value);
+    return el.value.trim();
+  }
+  function openForm({ title, groups, values = {}, onSave, onDelete = null, deleteLabel = 'Eintrag löschen' }) {
+    const allFields = groups.flat();
+    const body = groups.map((g) => `<div class="form">${g.map((f) => fieldHtml(f, values[f.key])).join('')}</div>`).join('') +
+      (onDelete ? `<button class="btn danger" data-sheet="delete">${esc(deleteLabel)}</button>` : '');
+    openSheet({
+      title, body,
+      onSave: async () => {
+        const out = {};
+        for (const f of allFields) out[f.key] = readField(f);
+        for (const f of allFields) {
+          if (f.required && (out[f.key] === null || out[f.key] === '' || (Array.isArray(out[f.key]) && !out[f.key].length))) { toast(`Bitte „${f.label}“ ausfüllen.`); return false; }
+        }
+        return onSave(out);
+      },
+      onOpen: (sh) => { sh._onDelete = onDelete; }
+    });
+  }
+
+  // ---------- Formulare: Igel ----------
+  function igelForm(i = null) {
+    const isNew = !i;
+    const groups = [
+      [{ key: 'name', label: 'Name / Rufname' }, { key: 'nummer', label: 'Pflege-Nr.' },
+       { key: 'status', label: 'Status', type: 'select', options: opts(STATUS), default: 'aufnahme' },
+       { key: 'geschlecht', label: 'Geschlecht', type: 'select', options: opts(GESCHLECHT), default: 'unbekannt' },
+       { key: 'alter', label: 'Alter', type: 'select', options: opts(ALTER), default: 'unbekannt' }],
+      [{ key: 'aufnahmeDatum', label: 'Aufnahme am', type: 'date', required: true, default: today() },
+       ...(isNew ? [{ key: 'aufnahmeGewicht', label: 'Gewicht bei Aufnahme (g)', type: 'number', placeholder: 'z. B. 380' }] : []),
+       { key: 'zustand', label: 'Zustand bei Aufnahme', type: 'textarea' }],
+      [{ key: 'fundDatum', label: 'Fund am', type: 'date' }, { key: 'fundOrt', label: 'Fundort' },
+       { key: 'fundUmstaende', label: 'Fundumstände', type: 'textarea' },
+       { key: 'finderName', label: 'Finder (Name)' }, { key: 'finderKontakt', label: 'Kontakt Finder', type: 'tel' }],
+      [{ key: 'abgangDatum', label: 'Abgang am (Auswilderung / Weitergabe / Tod)', type: 'date' }, { key: 'abgangOrt', label: 'Verbleib / Auswilderungsort' },
+       { key: 'notizen', label: 'Notizen', type: 'textarea' }]
+    ];
+    openForm({
+      title: isNew ? 'Igel aufnehmen' : 'Igel bearbeiten', groups, values: i || {},
+      onSave: async (v) => {
+        if (!v.name && !v.nummer) { toast('Bitte Name oder Pflege-Nr. angeben.'); return false; }
+        const obj = { ...(i || {}), ...v };
+        delete obj.aufnahmeGewicht;
+        if (!ACTIVE.has(obj.status) && !obj.abgangDatum) obj.abgangDatum = today();
+        await save('igel', obj);
+        if (isNew && v.aufnahmeGewicht) await save('gewichte', { igelId: obj.id, datum: `${v.aufnahmeDatum}T${nowDT().slice(11)}`, gramm: v.aufnahmeGewicht, notiz: 'Aufnahme' });
+        toast(isNew ? 'Igel aufgenommen' : 'Gespeichert');
+        if (isNew) { closeSheet(); go({ name: 'detail', id: obj.id }); return 'handled'; }
+        return true;
+      },
+      onDelete: isNew ? null : () => confirmDeleteIgel(i.id), deleteLabel: 'Igel löschen'
+    });
+  }
+  async function confirmDeleteIgel(id) {
+    const i = igelById(id);
+    if (!confirm(`„${igelName(i)}“ mit allen Wiegungen, Fotos, Medikationen und Einträgen endgültig löschen?`)) return false;
+    await deleteIgel(id); closeSheet(); toast('Igel gelöscht'); go({ name: 'list' }, { keepPrev: true }); return 'handled';
+  }
+
+  // ---------- Formulare: Gewicht ----------
+  function weightForm(igelId, w = null) {
+    openForm({
+      title: w ? 'Wiegung bearbeiten' : `Wiegen – ${igelName(igelById(igelId))}`,
+      groups: [[{ key: 'gramm', label: 'Gewicht (g)', type: 'number', required: true, placeholder: lastWeight(igelId) ? `zuletzt ${fmtNum(lastWeight(igelId).gramm)} g` : 'z. B. 450' },
+        { key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() }, { key: 'notiz', label: 'Notiz' }]],
+      values: w || {},
+      onSave: async (v) => {
+        if (v.gramm <= 0 || v.gramm > 3000) { toast('Gewicht unplausibel – bitte prüfen.'); return false; }
+        await save('gewichte', { ...(w || { igelId }), ...v }); toast('Gewicht gespeichert'); return true;
+      },
+      onDelete: w ? async () => { if (!confirm('Wiegung löschen?')) return false; await remove('gewichte', w.id); return true; } : null
+    });
+    setTimeout(() => { const el = $('#f_gramm'); if (el && !w) el.focus(); }, 250);
+  }
+
+  // ---------- Formulare: Medikation ----------
+  function medForm(igelId, m = null) {
+    openForm({
+      title: m ? 'Medikation bearbeiten' : 'Neue Medikation',
+      groups: [
+        [{ key: 'mittel', label: 'Medikament', required: true }, { key: 'grund', label: 'Grund / Indikation' },
+         { key: 'dosis', label: 'Dosis', required: true, placeholder: 'z. B. 0,1 ml' },
+         { key: 'applikation', label: 'Verabreichung', type: 'select', options: opts(APPLIKATION), default: 'oral' },
+         { key: 'proTag', label: 'Gaben pro Tag', type: 'number', required: true, default: 1 }],
+        [{ key: 'start', label: 'Beginn', type: 'date', required: true, default: today() },
+         { key: 'tage', label: 'Dauer in Tagen (leer = bis abgesetzt)', type: 'number' },
+         { key: 'abgesetzt', label: 'Vorzeitig abgesetzt am', type: 'date' },
+         { key: 'verordnetVon', label: 'Verordnet von (Tierarzt)' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }]
+      ],
+      values: m || {},
+      onSave: async (v) => {
+        v.proTag = Math.max(1, Math.round(v.proTag || 1)); if (v.tage != null) v.tage = Math.max(1, Math.round(v.tage));
+        await save('medikation', { ...(m || { igelId }), ...v }); toast('Medikation gespeichert'); return true;
+      },
+      onDelete: m ? async () => {
+        if (!confirm('Medikation inkl. aller eingetragenen Gaben löschen?')) return false;
+        await removeMany('gaben', D.gaben.filter((g) => g.medId === m.id).map((g) => g.id)); await remove('medikation', m.id); return true;
+      } : null
+    });
+  }
+  async function give(medId) {
+    const m = D.medikation.find((x) => x.id === medId); if (!m) return;
+    await save('gaben', { igelId: m.igelId, medId, zeit: nowDT() });
+    toast(`${m.mittel} eingetragen`); render();
+  }
+  async function undoGive(medId) {
+    const g = gabenOn(medId, today()); if (!g.length) return;
+    await remove('gaben', g[g.length - 1].id); toast('Letzte Gabe entfernt'); render();
+  }
+
+  // ---------- Formulare: Kotprobe ----------
+  function befundForm(igelId, b = null) {
+    openForm({
+      title: b ? 'Kotprobe bearbeiten' : 'Neue Kotprobe',
+      groups: [
+        [{ key: 'datum', label: 'Datum', type: 'date', required: true, default: today() }, { key: 'untersucher', label: 'Untersucht von (Tierarzt / Labor / selbst)' }],
+        [{ key: 'ergebnis', label: 'Befund', type: 'checks', options: PARASITEN }, { key: 'befall', label: 'Befallsgrad', type: 'select', options: opts(BEFALL) }],
+        [{ key: 'kontrolleAm', label: 'Kontrolle geplant am', type: 'date' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }]
+      ],
+      values: b || {},
+      onSave: async (v) => { await save('befunde', { ...(b || { igelId }), ...v }); toast('Kotprobe gespeichert'); return true; },
+      onDelete: b ? async () => { if (!confirm('Kotprobe löschen?')) return false; await remove('befunde', b.id); return true; } : null
+    });
+  }
+
+  // ---------- Formulare: Tierarzt ----------
+  function vetForm(igelId, v0 = null) {
+    const lastPraxis = D.tierarzt.slice().sort((a, b) => b.datum.localeCompare(a.datum))[0]?.praxis || '';
+    openForm({
+      title: v0 ? 'Tierarztbesuch bearbeiten' : 'Tierarztbesuch',
+      groups: [
+        [{ key: 'datum', label: 'Datum', type: 'date', required: true, default: today() }, { key: 'praxis', label: 'Praxis / Tierarzt', default: v0 ? '' : lastPraxis },
+         { key: 'grund', label: 'Grund des Besuchs', required: true }],
+        [{ key: 'diagnose', label: 'Befund / Diagnose', type: 'textarea' }, { key: 'behandlung', label: 'Behandlung', type: 'textarea' }],
+        [{ key: 'kosten', label: 'Kosten (€)', type: 'number' }, { key: 'naechsterTermin', label: 'Nächster Termin', type: 'date' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }]
+      ],
+      values: v0 || {},
+      onSave: async (v) => { await save('tierarzt', { ...(v0 || { igelId }), ...v }); toast('Tierarztbesuch gespeichert'); return true; },
+      onDelete: v0 ? async () => { if (!confirm('Tierarztbesuch löschen?')) return false; await remove('tierarzt', v0.id); return true; } : null
+    });
+  }
+
+  // ---------- Formulare: Futter ----------
+  function futterForm(igelId, f = null) {
+    const last = byIgel('futter', igelId).sort((a, b) => b.datum.localeCompare(a.datum))[0];
+    openForm({
+      title: f ? 'Fütterung bearbeiten' : `Fütterung – ${igelName(igelById(igelId))}`,
+      groups: [[
+        { key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() },
+        { key: 'futter', label: 'Futter', required: true, list: FUTTER_VORSCHLAEGE, default: f ? '' : last?.futter || '' },
+        { key: 'menge', label: 'Menge (g)', type: 'number', default: f ? '' : last?.menge ?? '' },
+        { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' },
+        { key: 'notiz', label: 'Notiz (Kot, Trinken, Auffälligkeiten)' }
+      ]],
+      values: f || {},
+      onSave: async (v) => { await save('futter', { ...(f || { igelId }), ...v }); toast('Fütterung gespeichert'); return true; },
+      onDelete: f ? async () => { if (!confirm('Eintrag löschen?')) return false; await remove('futter', f.id); return true; } : null
+    });
+  }
+
+  // ---------- Fotos ----------
+  function loadImage(file) {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(file); const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); res(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Bild konnte nicht gelesen werden')); };
+      img.src = url;
+    });
+  }
+  function scaled(img, max, q) {
+    const r = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * r); c.height = Math.round(img.naturalHeight * r);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return new Promise((res, rej) => c.toBlob((b) => (b ? b.arrayBuffer().then((buf) => res({ buf, w: c.width, h: c.height })) : rej(new Error('Bild konnte nicht verarbeitet werden'))), 'image/jpeg', q));
+  }
+  function pickPhotos(igelId) {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+    inp.onchange = async () => {
+      const files = Array.from(inp.files || []); if (!files.length) return;
+      toast('Fotos werden gespeichert …', 10000);
+      let ok = 0;
+      for (const file of files) {
+        try {
+          const img = await loadImage(file);
+          const full = await scaled(img, 1600, 0.82); const thumb = await scaled(img, 360, 0.75);
+          const datum = file.lastModified ? dtStr(new Date(file.lastModified)) : nowDT();
+          await save('fotos', { igelId, datum, type: 'image/jpeg', full: full.buf, thumb: thumb.buf, w: full.w, h: full.h });
+          ok++;
+        } catch (e) { console.error(e); }
+      }
+      toast(ok === files.length ? `${ok} Foto${ok === 1 ? '' : 's'} gespeichert` : `${ok} von ${files.length} Fotos gespeichert`);
+      render();
+    };
+    inp.click();
+  }
+  function photoSheet(fotoId) {
+    const p = D.fotos.find((x) => x.id === fotoId); if (!p) return;
+    const i = igelById(p.igelId);
+    openSheet({
+      title: fmtDT(p.datum) || 'Foto', cancelLabel: 'Schließen',
+      body: `<img src="${photoUrl(p, true)}" alt="" style="width:100%;border-radius:14px;margin-bottom:12px">
+        <div class="btn-row">
+          <button class="btn secondary" data-sheet="photoTitle" data-id="${p.id}"${i && i.titelFotoId === p.id ? ' disabled' : ''}>Als Titelbild</button>
+          <button class="btn secondary" data-sheet="photoShare" data-id="${p.id}">Teilen</button>
+          <button class="btn danger" data-sheet="photoDel" data-id="${p.id}">Löschen</button>
+        </div>`
+    });
+  }
+
+  // ---------- Teilen / Speichern ----------
+  async function shareFile(blob, filename) {
+    const file = new File([blob], filename, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: filename }); return true; }
+      catch (e) { if (e.name === 'AbortError') return false; console.warn(e); }
+    }
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000); return true;
+  }
+  // iOS verlangt für "Teilen" einen direkten Tipp. Daher: erst Datei erzeugen, dann Teilen-Knopf anzeigen.
+  function readySheet(title, blob, filename, info, after) {
+    openSheet({
+      title, cancelLabel: 'Schließen',
+      body: `<div class="card"><p style="margin-top:0"><strong>${esc(filename)}</strong><br><span class="note">${esc(info)}</span></p>
+        <button class="btn" data-sheet="share">Teilen / In Dateien sichern</button></div>`,
+      onOpen: (sh) => { sh._share = async () => { const ok = await shareFile(blob, filename); if (ok && after) await after(); }; }
+    });
+  }
+
+  // ---------- Backup ----------
+  function bufToB64(buf) {
+    const bytes = new Uint8Array(buf); let bin = ''; const CH = 0x8000;
+    for (let k = 0; k < bytes.length; k += CH) bin += String.fromCharCode.apply(null, bytes.subarray(k, k + CH));
+    return btoa(bin);
+  }
+  function b64ToBuf(b64) { const bin = atob(b64); const bytes = new Uint8Array(bin.length); for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k); return bytes.buffer; }
+  async function makeBackup() {
+    toast('Backup wird erstellt …', 10000);
+    const data = {};
+    for (const s of DATA_STORES) data[s] = s === 'fotos' ? D.fotos.map((p) => ({ ...p, full: bufToB64(p.full), thumb: bufToB64(p.thumb) })) : D[s];
+    const settings = { ...S }; delete settings.lastBackup;
+    const json = JSON.stringify({ app: 'igelpflege', format: 1, version: VERSION, exportedAt: new Date().toISOString(), settings, data });
+    const blob = new Blob([json], { type: 'application/json' });
+    $('#toast').hidden = true;
+    readySheet('Backup bereit', blob, `igelpflege-backup-${today()}.json`, `${D.igel.length} Igel, ${D.fotos.length} Fotos · ${fmtNum(blob.size / 1048576, 1)} MB. Am besten in „Dateien“ → iCloud Drive sichern.`,
+      async () => { S.lastBackup = today(); await saveSettings(); updateBadge(); });
+  }
+  async function restoreBackup(file) {
+    let obj;
+    try { obj = JSON.parse(await file.text()); } catch (e) { toast('Datei ist kein gültiges Backup.'); return; }
+    if (!obj || obj.app !== 'igelpflege' || !obj.data) { toast('Datei ist kein Igelpflege-Backup.'); return; }
+    const n = (obj.data.igel || []).length;
+    if (!confirm(`Backup vom ${fmtD(dStr(new Date(obj.exportedAt)))} mit ${n} Igel(n) einspielen?\n\nACHTUNG: Alle aktuellen Daten auf diesem Gerät werden dabei ersetzt.`)) return;
+    try {
+      const t = db.transaction(STORES, 'readwrite');
+      for (const s of DATA_STORES) {
+        const os = t.objectStore(s); os.clear();
+        for (const rec of obj.data[s] || []) os.put(s === 'fotos' ? { ...rec, full: b64ToBuf(rec.full), thumb: b64ToBuf(rec.thumb) } : rec);
+      }
+      if (obj.settings) t.objectStore('settings').put({ ...DEFAULTS, ...obj.settings, id: 'main', lastBackup: dStr(new Date(obj.exportedAt)) });
+      await txDone(t);
+      for (const k of urlCache.keys()) URL.revokeObjectURL(urlCache.get(k)); urlCache.clear();
+      await loadAll(); toast('Backup eingespielt'); go({ name: 'list' }, { keepPrev: true });
+    } catch (e) { console.error(e); toast('Fehler beim Einspielen: ' + e.message, 5000); await loadAll(); render(); }
+  }
+  async function wipeAll() {
+    if (!confirm('Wirklich ALLE Daten (Igel, Fotos, Protokolle) von diesem Gerät löschen?')) return;
+    if (!confirm('Letzte Rückfrage: Das kann nicht rückgängig gemacht werden. Fortfahren?')) return;
+    const t = db.transaction(STORES, 'readwrite'); STORES.forEach((s) => t.objectStore(s).clear()); await txDone(t);
+    for (const k of urlCache.keys()) URL.revokeObjectURL(urlCache.get(k)); urlCache.clear();
+    await loadAll(); toast('Alle Daten gelöscht'); go({ name: 'list' }, { keepPrev: true });
+  }
+
+  // ---------- PDF ----------
+  function autoTable(doc, o) {
+    if (typeof doc.autoTable === 'function') return doc.autoTable(o);
+    const p = window.jspdf_autotable; const fn = p && (p.autoTable || p.default);
+    if (fn) return fn(doc, o);
+    throw new Error('PDF-Tabellen-Modul nicht geladen');
+  }
+  async function buildPdf(i) {
+    if (!window.jspdf) throw new Error('PDF-Modul nicht geladen');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const W = 210, M = 14;
+    const green = [91, 127, 58];
+    const tableBase = { margin: { left: M, right: M }, styles: { fontSize: 9, cellPadding: 1.6, overflow: 'linebreak' }, headStyles: { fillColor: green, textColor: 255 }, alternateRowStyles: { fillColor: [244, 246, 241] } };
+    const endY = () => doc.lastAutoTable.finalY;
+    let y = M;
+
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.setTextColor(30);
+    doc.text(`Pflegeprotokoll: ${igelName(i)}`, M, y + 5);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(110);
+    const kopf = [S.pflegestelle, S.ansprechpartner, S.kontakt].filter(Boolean).join(' · ');
+    y += 10;
+    if (kopf) { doc.text(kopf, M, y); y += 4.5; }
+    doc.text(`Erstellt am ${fmtDT(nowDT())}`, M, y); y += 5;
+
+    const p = titlePhoto(i); const photoW = 52; let photoBottom = y;
+    if (p) {
+      const h = Math.min(photoW * (p.h / p.w), 70);
+      const w = h / (p.h / p.w);
+      doc.addImage(new Uint8Array(p.full), 'JPEG', W - M - w, y, w, h); photoBottom = y + h;
+    }
+    const lw = lastWeight(i.id), fw = firstWeight(i.id);
+    const stamm = [
+      ['Name', i.name], ['Pflege-Nr.', i.nummer], ['Status', STATUS_L[i.status]], ['Geschlecht', label(GESCHLECHT, i.geschlecht)], ['Alter', label(ALTER, i.alter)],
+      ['Aufnahme', fmtD(i.aufnahmeDatum)], ['Tage in Pflege', inCareDays(i) != null ? String(inCareDays(i)) : ''],
+      ['Gewicht Aufnahme', fw ? `${fmtNum(fw.gramm)} g (${fmtD(fw.datum)})` : ''], ['Gewicht aktuell', lw ? `${fmtNum(lw.gramm)} g (${fmtD(lw.datum)})` : ''],
+      ['Fund am', fmtD(i.fundDatum)], ['Fundort', i.fundOrt], ['Fundumstände', i.fundUmstaende], ['Finder', [i.finderName, i.finderKontakt].filter(Boolean).join(', ')],
+      ['Zustand bei Aufnahme', i.zustand], ['Abgang am', fmtD(i.abgangDatum)], ['Verbleib', i.abgangOrt], ['Notizen', i.notizen]
+    ].filter(([, v]) => v);
+    autoTable(doc, { ...tableBase, startY: y, body: stamm, theme: 'plain', tableWidth: W - 2 * M - (p ? photoW + 4 : 0),
+      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 38, textColor: 90 } }, styles: { fontSize: 9.5, cellPadding: 1.2 } });
+    y = Math.max(endY(), photoBottom) + 7;
+
+    const section = (title) => {
+      if (y > 265) { doc.addPage(); y = M; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(30); doc.text(title, M, y); y += 2.5;
+    };
+
+    // Gewicht
+    const ws = weightsOf(i.id);
+    section('Gewichtsverlauf');
+    if (ws.length >= 2) {
+      const cw = W - 2 * M, ch = 55; if (y + ch > 280) { doc.addPage(); y = M; }
+      const ziel = S.zielgewicht || null; const sc = chartScale(ws, ziel);
+      const L = M + 12, T = y + 3, R = M + cw, B = y + ch - 6;
+      const X = (x) => L + (x - sc.xmin) / (sc.xmax - sc.xmin) * (R - L);
+      const Yp = (v) => T + (1 - (v - sc.ymin) / (sc.ymax - sc.ymin)) * (B - T);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(120); doc.setDrawColor(220); doc.setLineWidth(0.2);
+      for (let v = sc.ymin; v <= sc.ymax + 0.001; v += sc.step) { doc.line(L, Yp(v), R, Yp(v)); doc.text(fmtNum(v), L - 1.5, Yp(v) + 1, { align: 'right' }); }
+      for (let k = 0; k <= 5; k++) { const x = sc.xmin + (sc.xmax - sc.xmin) * k / 5; doc.text(fmtShort(dtStr(new Date(x))), X(x), B + 4, { align: k === 0 ? 'left' : k === 5 ? 'right' : 'center' }); }
+      if (ziel) { doc.setDrawColor(122, 87, 60); doc.setLineDashPattern([1.5, 1.2], 0); doc.line(L, Yp(ziel), R, Yp(ziel)); doc.setLineDashPattern([], 0); doc.setTextColor(122, 87, 60); doc.text(`Ziel ${fmtNum(ziel)} g`, R, Yp(ziel) - 1, { align: 'right' }); }
+      doc.setDrawColor(...green); doc.setLineWidth(0.6);
+      for (let k = 1; k < ws.length; k++) doc.line(X(sc.xs[k - 1]), Yp(sc.ys[k - 1]), X(sc.xs[k]), Yp(sc.ys[k]));
+      doc.setFillColor(...green); if (ws.length <= 80) ws.forEach((_, k) => doc.circle(X(sc.xs[k]), Yp(sc.ys[k]), 0.7, 'F'));
+      doc.setLineWidth(0.2); y += ch + 2;
+    }
+    if (ws.length) {
+      autoTable(doc, { ...tableBase, startY: y, head: [['Datum', 'Gewicht', 'Veränderung', 'Notiz']],
+        body: ws.map((w, k) => [fmtDT(w.datum), `${fmtNum(w.gramm)} g`, k ? `${signed(w.gramm - ws[k - 1].gramm)} g` : '', w.notiz || '']) });
+      y = endY() + 7;
+    } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Wiegungen.', M, y + 4); y += 10; }
+
+    // Medikation
+    const meds = byIgel('medikation', i.id).sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+    section('Medikation');
+    if (meds.length) {
+      autoTable(doc, { ...tableBase, startY: y, head: [['Medikament', 'Dosis', 'Gabe', 'pro Tag', 'Zeitraum', 'Gaben erfasst', 'Grund / Notiz']],
+        body: meds.map((m) => [m.mittel, m.dosis, label(APPLIKATION, m.applikation), String(m.proTag || 1),
+          `${fmtD(m.start)} – ${m.abgesetzt ? fmtD(m.abgesetzt) + ' (abgesetzt)' : medEnde(m) ? fmtD(medEnde(m)) : 'offen'}`,
+          String(D.gaben.filter((g) => g.medId === m.id).length), [m.grund, m.verordnetVon ? 'verordnet: ' + m.verordnetVon : '', m.notiz].filter(Boolean).join(' · ')]) });
+      y = endY() + 7;
+    } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Medikation.', M, y + 4); y += 10; }
+
+    // Kotproben
+    const bef = byIgel('befunde', i.id).sort((a, b) => a.datum.localeCompare(b.datum));
+    section('Kotproben / Parasiten');
+    if (bef.length) {
+      autoTable(doc, { ...tableBase, startY: y, head: [['Datum', 'Befund', 'Befall', 'Untersucht von', 'Kontrolle', 'Notiz']],
+        body: bef.map((b) => [fmtD(b.datum), (b.ergebnis || []).join(', '), b.befall || '', b.untersucher || '', fmtD(b.kontrolleAm), b.notiz || '']) });
+      y = endY() + 7;
+    } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Kotproben.', M, y + 4); y += 10; }
+
+    // Tierarzt
+    const ta = byIgel('tierarzt', i.id).sort((a, b) => a.datum.localeCompare(b.datum));
+    section('Tierarztbesuche');
+    if (ta.length) {
+      const sum = ta.reduce((s, v) => s + (v.kosten || 0), 0);
+      autoTable(doc, { ...tableBase, startY: y, head: [['Datum', 'Praxis', 'Grund', 'Befund / Diagnose', 'Behandlung', 'Kosten']],
+        body: ta.map((v) => [fmtD(v.datum), v.praxis || '', v.grund || '', v.diagnose || '', v.behandlung || '', v.kosten != null ? `${fmtNum(v.kosten, 2)} €` : '']),
+        foot: sum ? [['', '', '', '', 'Summe', `${fmtNum(sum, 2)} €`]] : undefined, footStyles: { fillColor: [230, 236, 224], textColor: 30, fontStyle: 'bold' } });
+      y = endY() + 7;
+    } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Tierarztbesuche.', M, y + 4); y += 10; }
+
+    // Futter
+    const fs = byIgel('futter', i.id).sort((a, b) => a.datum.localeCompare(b.datum));
+    section('Futterprotokoll');
+    if (fs.length) {
+      autoTable(doc, { ...tableBase, startY: y, head: [['Zeitpunkt', 'Futter', 'Menge', 'Gefressen', 'Notiz']],
+        body: fs.map((f) => [fmtDT(f.datum), f.futter || '', f.menge != null ? `${fmtNum(f.menge)} g` : '', label(GEFRESSEN, f.gefressen), f.notiz || '']) });
+      y = endY() + 7;
+    } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Fütterungen.', M, y + 4); y += 10; }
+
+    const pages = doc.getNumberOfPages();
+    for (let k = 1; k <= pages; k++) {
+      doc.setPage(k); doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(140);
+      doc.text(`${igelName(i)} · Pflegeprotokoll`, M, 290); doc.text(`Seite ${k} von ${pages}`, W - M, 290, { align: 'right' });
+    }
+    return doc.output('blob');
+  }
+  async function makePdf(id) {
+    const i = igelById(id); if (!i) return;
+    toast('PDF wird erstellt …', 10000);
+    try {
+      const blob = await buildPdf(i);
+      $('#toast').hidden = true;
+      const fname = `Pflegeprotokoll-${igelName(i).replace(/[^\wäöüÄÖÜß-]+/g, '_')}-${today()}.pdf`;
+      readySheet('PDF bereit', blob, fname, `${fmtNum(blob.size / 1024)} KB`);
+    } catch (e) { console.error(e); toast('PDF-Fehler: ' + e.message, 5000); }
+  }
+
+  // ---------- Aktionen ----------
+  const actions = {
+    filter: (d) => { ui.filter = d.v; render(); },
+    newIgel: () => igelForm(),
+    open: (d) => go({ name: 'detail', id: d.id }),
+    dtab: (d) => { ui.detailTab = d.v; render(); },
+    addPhoto: (d) => pickPhotos(d.id),
+    photo: (d) => photoSheet(d.id),
+    pdf: (d) => makePdf(d.id),
+    delIgel: (d) => confirmDeleteIgel(d.id),
+    addWeight: (d) => weightForm(d.id),
+    editWeight: (d) => { const w = D.gewichte.find((x) => x.id === d.id); if (w) weightForm(w.igelId, w); },
+    addMed: (d) => medForm(d.id),
+    editMed: (d) => { const m = D.medikation.find((x) => x.id === d.id); if (m) medForm(m.igelId, m); },
+    give: (d) => give(d.id),
+    undoGive: (d) => undoGive(d.id),
+    addBefund: (d) => befundForm(d.id),
+    editBefund: (d) => { const b = D.befunde.find((x) => x.id === d.id); if (b) befundForm(b.igelId, b); },
+    addVet: (d) => vetForm(d.id),
+    editVet: (d) => { const v = D.tierarzt.find((x) => x.id === d.id); if (v) vetForm(v.igelId, v); },
+    addFutter: (d) => futterForm(d.id),
+    editFutter: (d) => { const f = D.futter.find((x) => x.id === d.id); if (f) futterForm(f.igelId, f); },
+    futterAlle: () => { ui.futterAlle = true; render(); },
+    backup: () => makeBackup(),
+    restore: () => $('#restoreFile').click(),
+    wipe: () => wipeAll(),
+    saveSettings: async () => {
+      const g = (k) => $('#s_' + k).value.trim();
+      S.pflegestelle = g('pflegestelle'); S.ansprechpartner = g('ansprechpartner'); S.kontakt = g('kontakt');
+      S.zielgewicht = num(g('zielgewicht')); S.wiegenTage = Math.max(1, Math.round(num(g('wiegenTage')) || 1)); S.wiegenTageWinter = Math.max(1, Math.round(num(g('wiegenTageWinter')) || 7));
+      await saveSettings(); toast('Einstellungen gespeichert'); render();
+    }
+  };
+
+  const sheetActions = {
+    cancel: () => closeSheet(),
+    save: async (el, sh) => {
+      if (!sh._onSave || el.disabled) return; el.disabled = true;
+      try { const r = await sh._onSave(); if (r === true) { closeSheet(); render(); } }
+      catch (e) { console.error(e); toast('Fehler beim Speichern: ' + e.message, 5000); }
+      finally { el.disabled = false; }
+    },
+    delete: async (el, sh) => { if (!sh._onDelete) return; const r = await sh._onDelete(); if (r === true) { closeSheet(); render(); toast('Gelöscht'); } },
+    share: async (el, sh) => { if (sh._share) await sh._share(); },
+    photoTitle: async (el) => { const p = D.fotos.find((x) => x.id === el.dataset.id); const i = p && igelById(p.igelId); if (!i) return; i.titelFotoId = p.id; await save('igel', i); closeSheet(); render(); toast('Titelbild gesetzt'); },
+    photoShare: async (el) => { const p = D.fotos.find((x) => x.id === el.dataset.id); if (p) await shareFile(new Blob([p.full], { type: 'image/jpeg' }), `igel-${dStr(parseD(p.datum) || new Date())}.jpg`); },
+    photoDel: async (el) => { if (!confirm('Foto löschen?')) return; const p = D.fotos.find((x) => x.id === el.dataset.id); if (!p) return; const i = igelById(p.igelId); if (i && i.titelFotoId === p.id) { i.titelFotoId = null; await save('igel', i); } await remove('fotos', p.id); closeSheet(); render(); toast('Foto gelöscht'); }
+  };
+
+  function bindEvents() {
+    $('#view').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-act]'); if (!el) return;
+      e.preventDefault(); const fn = actions[el.dataset.act]; if (fn) fn(el.dataset, el);
+    });
+    $('#view').addEventListener('input', (e) => {
+      if (e.target.id === 'search') {
+        ui.search = e.target.value; const pos = e.target.selectionStart;
+        render(); const s = $('#search'); if (s) { s.focus(); try { s.setSelectionRange(pos, pos); } catch (_) { /* */ } }
+      }
+    });
+    $('#view').addEventListener('change', (e) => { if (e.target.id === 'restoreFile' && e.target.files[0]) { restoreBackup(e.target.files[0]); e.target.value = ''; } });
+    $('#sheet').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-sheet]'); if (!el) return;
+      e.preventDefault(); const fn = sheetActions[el.dataset.sheet]; if (fn) fn(el, $('#sheet'));
+    });
+    $('#sheetBackdrop').addEventListener('click', closeSheet);
+    $('#btnBack').addEventListener('click', back);
+    $$('.tabbar button').forEach((b) => b.addEventListener('click', () => {
+      const t = b.dataset.tab; ui.prev = null;
+      ui.route = { name: t === 'igel' ? 'list' : t }; window.scrollTo(0, 0); render();
+    }));
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && db) render(); });
+  }
+
+  // ---------- Start ----------
+  async function init() {
+    bindEvents();
+    try {
+      db = await openDB();
+      await loadAll();
+    } catch (e) {
+      $('#view').innerHTML = `<div class="empty"><div class="big">⚠️</div><p>Die lokale Datenbank konnte nicht geöffnet werden.</p><p class="note">${esc(e.message || e)}</p></div>`;
+      return;
+    }
+    try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch (e) { /* */ }
+    render();
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      const hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW', e));
+      let reloaded = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloaded) return; reloaded = true;
+        if ($('#sheet').hidden) location.reload(); else toast('Update geladen – wird beim nächsten Start aktiv.', 4000);
+      });
+    }
+  }
+  // Für Tests
+  window.__igel = { D, get S() { return S; }, buildPdf, dueItems };
+  init();
+})();

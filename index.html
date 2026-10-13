@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Igelpflege">
+<meta name="theme-color" content="#f4f6f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151a14" media="(prefers-color-scheme: dark)">
+<meta name="format-detection" content="telephone=no">
+<title>Igelpflege</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <button class="nav-back" id="btnBack" hidden aria-label="Zurück">‹ Zurück</button>
+  <h1 id="title">Igelpflege</h1>
+  <button class="nav-action" id="btnAction" hidden></button>
+</header>
+
+<main id="view"></main>
+
+<nav class="tabbar">
+  <button data-tab="igel" class="active"><span class="ti">🦔</span><span>Igel</span></button>
+  <button data-tab="heute"><span class="ti">📋</span><span>Heute</span><span class="badge" id="badgeHeute" hidden></span></button>
+  <button data-tab="einstellungen"><span class="ti">⚙️</span><span>Einstellungen</span></button>
+</nav>
+
+<div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+<section class="sheet" id="sheet" hidden aria-modal="true" role="dialog"></section>
+<div class="toast" id="toast" hidden></div>
+
+<script src="vendor/jspdf.umd.min.js" defer></script>
+<script src="vendor/jspdf.plugin.autotable.min.js" defer></script>
+<script src="app.js" defer></script>
+</body>
+</html>
