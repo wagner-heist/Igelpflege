@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
@@ -187,9 +187,33 @@
   function medActiveOn(m, day) {
     if (!m.start || m.start > day) return false;
     if (m.tage) { const ende = addDays(m.start, m.tage - 1); if (day > ende) return false; }
-    return !m.abgesetzt;
+    return !(m.abgesetzt && day >= m.abgesetzt); // ab dem Absetz-Tag keine Gaben mehr fällig
   }
   const medEnde = (m) => (m.tage ? addDays(m.start, m.tage - 1) : null);
+  // Gabenprotokoll: alle Tage des Behandlungszeitraums (bis heute) plus Tage mit nachgetragenen Gaben außerhalb
+  function medProtokoll(m) {
+    const t = today();
+    let last = medEnde(m) || t;
+    if (m.abgesetzt) last = [last, addDays(m.abgesetzt, -1)].sort()[0];
+    if (last > t) last = t;
+    const gaben = D.gaben.filter((g) => g.medId === m.id).sort((a, b) => a.zeit.localeCompare(b.zeit));
+    const days = new Set(gaben.map((g) => dayOf(g.zeit)));
+    if (m.start && m.start <= last) for (let d = m.start; d <= last; d = addDays(d, 1)) days.add(d);
+    const soll = m.proTag || 1;
+    return [...days].sort().map((day) => {
+      const gs = gaben.filter((g) => dayOf(g.zeit) === day);
+      const faellig = medActiveOn(m, day);
+      const fehlt = faellig ? Math.max(0, soll - gs.length) : 0;
+      return { day, tag: m.start ? daysBetween(m.start, day) + 1 : null, gaben: gs, soll: faellig ? soll : 0, fehlt, heute: day === t };
+    });
+  }
+  function medBilanz(m) {
+    const p = medProtokoll(m);
+    const gegeben = p.reduce((s, d) => s + d.gaben.length, 0);
+    const fehlend = p.filter((d) => !d.heute).reduce((s, d) => s + d.fehlt, 0);
+    const soll = p.filter((d) => !d.heute).reduce((s, d) => s + d.soll, 0);
+    return { gegeben, fehlend, soll };
+  }
   const gabenOn = (medId, day) => D.gaben.filter((g) => g.medId === medId && dayOf(g.zeit) === day).sort((a, b) => a.zeit.localeCompare(b.zeit));
 
   // ---------- "Heute fällig" ----------
@@ -238,7 +262,7 @@
   function go(route, opts2 = {}) {
     if (opts2.keepPrev !== true) ui.prev = ui.route;
     ui.route = route;
-    if (route.name === 'detail' && !opts2.keepTab) { ui.detailTab = 'uebersicht'; ui.futterAlle = false; }
+    if (route.name === 'detail' && !opts2.keepTab) { ui.detailTab = 'uebersicht'; ui.futterAlle = false; ui.gabenAlle = false; }
     window.scrollTo(0, 0);
     render();
   }
@@ -246,6 +270,7 @@
     const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
     let p = parent ? { name: parent } : (ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' });
     if (ui.route.name === 'finder' && ui.prev && ui.prev.name === 'detail') p = ui.prev; // vom Igel aus geöffnet → zurück zum Igel
+    if (ui.route.name === 'med') { ui.prev = null; ui.detailTab = 'medizin'; return go({ name: 'detail', id: ui.route.igelId }, { keepPrev: true, keepTab: true }); }
     ui.prev = null; go(p, { keepPrev: true });
   }
   function setHeader(title, { back: showBack = false, action = null } = {}) {
@@ -268,6 +293,11 @@
       view.innerHTML = viewDetail(i);
     }
     else if (r.name === 'heute') { setTab('heute'); view.innerHTML = viewHeute(); }
+    else if (r.name === 'med') {
+      const m = D.medikation.find((x) => x.id === r.id);
+      if (!m) { ui.route = r.igelId ? { name: 'detail', id: r.igelId } : { name: 'list' }; ui.detailTab = 'medizin'; return render(); }
+      setTab('igel'); view.innerHTML = viewMed(m);
+    }
     else if (r.name === 'medliste') { setTab('einstellungen'); view.innerHTML = viewMedListe(); }
     else if (r.name === 'futterliste') { setTab('einstellungen'); view.innerHTML = viewFutterListe(); }
     else if (r.name === 'finderliste') { setTab('einstellungen'); view.innerHTML = viewFinderListe(); }
@@ -394,6 +424,84 @@
       ${ws.length ? `<div class="list">${rows}</div>` : '<div class="empty">Noch keine Wiegung eingetragen.</div>'}`;
   }
 
+  // Zeitleiste aller Gaben dieses Igels, nach Tagen gruppiert
+  function gabenVerlaufHtml(i) {
+    const gs = byIgel('gaben', i.id).sort((a, b) => b.zeit.localeCompare(a.zeit));
+    if (!gs.length) return '';
+    const shown = ui.gabenAlle ? gs : gs.slice(0, 30);
+    const medBy = (id) => D.medikation.find((m) => m.id === id);
+    const groups = [];
+    for (const g of shown) { const d = dayOf(g.zeit); let grp = groups[groups.length - 1]; if (!grp || grp.day !== d) { grp = { day: d, items: [] }; groups.push(grp); } grp.items.push(g); }
+    const wd = (d) => parseD(d).toLocaleDateString('de-DE', { weekday: 'short' });
+    return `<div class="section-title">Gabenverlauf (${gs.length})</div>
+      ${groups.map((grp) => `<div class="day-head">${wd(grp.day)} ${fmtD(grp.day)}${grp.day === today() ? ' · heute' : ''}</div>
+        <div class="list">${grp.items.map((g) => { const m = medBy(g.medId); return `<button class="row" data-act="editGabe" data-id="${g.id}">
+          <span class="time">${esc(g.zeit.slice(11, 16))}</span>
+          <span class="grow"><span class="t">${esc(m ? m.mittel : 'Medikament gelöscht')}</span>${m ? ` <span class="s">${esc(m.dosis)}</span>` : ''}${g.notiz ? `<br><span class="s">${esc(g.notiz)}</span>` : ''}</span><span class="chev">›</span></button>`; }).join('')}</div>`).join('')}
+      ${gs.length > shown.length ? `<button class="btn secondary" data-act="gabenAlle">Alle ${gs.length} Gaben anzeigen</button>` : ''}`;
+  }
+
+  // ---------- Ansicht: Medikation mit Gabenprotokoll ----------
+  function viewMed(m) {
+    const i = igelById(m.igelId);
+    setHeader(m.mittel, { back: true, action: { label: 'Bearbeiten', fn: () => medForm(m.igelId, m) } });
+    const t = today(); const ende = medEnde(m); const bil = medBilanz(m);
+    const prot = medProtokoll(m).reverse();
+    const aktivHeute = medActiveOn(m, t);
+    return `
+      <div class="card">
+        <div class="note" style="margin-bottom:6px">${esc(igelName(i))}${i && i.box ? ` · Box ${esc(i.box)}` : ''}</div>
+        <dl class="kv">
+          <dt>Dosis</dt><dd>${esc(m.dosis)} · ${esc(label(APPLIKATION, m.applikation))}</dd>
+          <dt>Häufigkeit</dt><dd>${m.proTag || 1}× täglich</dd>
+          <dt>Zeitraum</dt><dd>${fmtD(m.start)} – ${m.abgesetzt ? `abgesetzt ${fmtD(m.abgesetzt)}` : ende ? fmtD(ende) : 'offen'}${m.tage ? ` (${m.tage} Tage)` : ''}</dd>
+          ${m.grund ? `<dt>Grund</dt><dd>${esc(m.grund)}</dd>` : ''}
+          ${m.verordnetVon ? `<dt>Verordnet von</dt><dd>${esc(m.verordnetVon)}</dd>` : ''}
+          ${m.notiz ? `<dt>Notiz</dt><dd>${esc(m.notiz)}</dd>` : ''}
+        </dl>
+        <div class="stats">
+          <div class="stat"><div class="v">${bil.gegeben}</div><div class="l">Gaben erfasst</div></div>
+          <div class="stat"><div class="v ${bil.fehlend ? 'down' : 'up'}">${bil.fehlend}</div><div class="l">fehlend</div></div>
+          <div class="stat"><div class="v">${bil.soll ? fmtNum(Math.min(100, (bil.soll - bil.fehlend) / bil.soll * 100)) + ' %' : '–'}</div><div class="l">vollständig*</div></div>
+        </div>
+        <p class="note" style="margin-bottom:0">* bis gestern; heute zählt erst ab morgen</p>
+      </div>
+      <div class="btn-row" style="margin-bottom:12px">
+        ${aktivHeute ? `<button class="btn" data-act="give" data-id="${m.id}">✓ Jetzt gegeben</button>` : ''}
+        <button class="btn secondary" data-act="addGabe" data-id="${m.id}">＋ Gabe nachtragen</button>
+      </div>
+      <div class="section-title">Gabenprotokoll</div>
+      ${prot.length ? `<div class="list">${prot.map((d) => `
+        <div class="row ${d.fehlt && !d.heute ? 'due over' : ''}">
+          <span class="grow"><span class="t">${d.tag != null && d.tag >= 1 ? `Tag ${d.tag} · ` : ''}${parseD(d.day).toLocaleDateString('de-DE', { weekday: 'short' })} ${fmtD(d.day)}</span>${d.heute ? ' <span class="chip pflege">heute</span>' : ''}<br>
+            <span class="gabe-chips">${d.gaben.map((g) => `<button class="gabe-chip" data-act="editGabe" data-id="${g.id}">✓ ${esc(g.zeit.slice(11, 16))}${g.notiz ? ' 📝' : ''}</button>`).join('')}
+            ${d.fehlt ? `<span class="gabe-chip missing">${d.heute ? `${d.fehlt} offen` : `${d.fehlt} fehlt`}</span>` : ''}
+            ${!d.gaben.length && !d.soll ? '<span class="s">keine Gabe fällig</span>' : ''}</span></span>
+          <span class="r"><span class="${d.soll && !d.fehlt ? 'done-mark' : 'progress'}">${d.gaben.length}${d.soll ? '/' + d.soll : ''}</span><br>
+            <button class="link" data-act="addGabe" data-id="${m.id}" data-day="${d.day}" aria-label="Gabe an diesem Tag nachtragen">＋</button></span>
+        </div>`).join('')}</div>` : '<div class="card note">Die Behandlung hat noch nicht begonnen.</div>'}`;
+  }
+  // Gabe nachtragen / bearbeiten
+  function gabeForm({ med, gabe = null, day = null }) {
+    const m = med || D.medikation.find((x) => x.id === gabe.medId);
+    const def = day ? `${day}T${nowDT().slice(11)}` : nowDT();
+    openForm({
+      title: gabe ? 'Gabe bearbeiten' : 'Gabe nachtragen',
+      groups: [[
+        { key: 'zeit', label: `${m ? m.mittel + ' · ' + m.dosis : 'Gabe'} – Zeitpunkt`, type: 'datetime', required: true, default: def },
+        { key: 'notiz', label: 'Notiz (z. B. „nur halb geschluckt“, „erbrochen“)' }
+      ]],
+      values: gabe || {},
+      onSave: async (v) => {
+        if (v.zeit > nowDT()) { toast('Der Zeitpunkt liegt in der Zukunft.'); return false; }
+        await save('gaben', { ...(gabe || { igelId: m.igelId, medId: m.id }), ...v });
+        toast(gabe ? 'Gabe geändert' : 'Gabe nachgetragen'); return true;
+      },
+      onDelete: gabe ? async () => { if (!confirm('Diese Gabe löschen?')) return false; await remove('gaben', gabe.id); return true; } : null,
+      deleteLabel: 'Gabe löschen'
+    });
+  }
+
   function detailMedizin(i) {
     const t = today();
     const meds = byIgel('medikation', i.id).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
@@ -403,9 +511,11 @@
       const ende = medEnde(m);
       const g = gabenOn(m.id, t).length; const soll = m.proTag || 1;
       const isActive = medActiveOn(m, t);
-      return `<button class="row" data-act="editMed" data-id="${m.id}">
+      const bil = medBilanz(m);
+      return `<button class="row" data-act="openMed" data-id="${m.id}">
         <span class="grow"><span class="t">${esc(m.mittel)}</span> <span class="s">${esc(m.dosis)} · ${esc(label(APPLIKATION, m.applikation))} · ${soll}× tägl.</span><br>
-        <span class="s">${fmtD(m.start)} – ${m.abgesetzt ? 'abgesetzt ' + fmtD(m.abgesetzt) : ende ? fmtD(ende) : 'offen'}${m.grund ? ' · ' + esc(m.grund) : ''}</span></span>
+        <span class="s">${fmtD(m.start)} – ${m.abgesetzt ? 'abgesetzt ' + fmtD(m.abgesetzt) : ende ? fmtD(ende) : 'offen'}${m.grund ? ' · ' + esc(m.grund) : ''}</span><br>
+        <span class="s">${bil.gegeben} ${bil.gegeben === 1 ? 'Gabe' : 'Gaben'} erfasst${bil.fehlend ? ` · <span class="down">⚠️ ${bil.fehlend} fehlend</span>` : ''}</span></span>
         ${isActive ? `<span class="r ${g >= soll ? 'done-mark' : 'progress'}">${g}/${soll} heute</span>` : ''}<span class="chev">›</span></button>`;
     };
     const bef = byIgel('befunde', i.id).sort((a, b) => b.datum.localeCompare(a.datum));
@@ -415,6 +525,8 @@
       ${aktiv.length ? `<div class="list">${aktiv.map(medRow).join('')}</div>` : '<div class="card note">Keine laufende Medikation.</div>'}
       ${aktiv.filter((m) => medActiveOn(m, t)).length ? `<div class="btn-row" style="margin-bottom:12px">${aktiv.filter((m) => medActiveOn(m, t)).map((m) => `<button class="btn small secondary" data-act="give" data-id="${m.id}">✓ ${esc(m.mittel)} gegeben</button>`).join('')}</div>` : ''}
       ${alt.length ? `<div class="section-title">Frühere Medikation</div><div class="list">${alt.map(medRow).join('')}</div>` : ''}
+
+      ${gabenVerlaufHtml(i)}
 
       <div class="section-title">Kotproben / Parasiten <button class="link" data-act="addBefund" data-id="${i.id}">＋ Neu</button></div>
       ${bef.length ? `<div class="list">${bef.map((b) => `<button class="row" data-act="editBefund" data-id="${b.id}">
@@ -502,7 +614,7 @@
       d.meds.sort((a, b) => (a.done >= a.soll) - (b.done >= b.soll) || byBox(a.igel, b.igel));
       html += `<div class="list">${d.meds.map(({ igel, med, done, soll }) => `
         <div class="row ${done < soll ? 'due' : ''}">
-          <span class="grow">${igelLink(igel)}<br><span class="t">${esc(med.mittel)}</span> <span class="s">${esc(med.dosis)} · ${esc(label(APPLIKATION, med.applikation))}</span>
+          <span class="grow">${igelLink(igel)}<br><button class="link" data-act="openMed" data-id="${med.id}" style="color:var(--text)">${esc(med.mittel)} ›</button> <span class="s">${esc(med.dosis)} · ${esc(label(APPLIKATION, med.applikation))}</span>
           ${done ? `<br><span class="s">gegeben: ${gabenOn(med.id, t).map((g) => fmtDT(g.zeit).split(', ')[1]).join(', ')} · <button class="link" data-act="undoGive" data-id="${med.id}">rückgängig</button></span>` : ''}</span>
           <span class="r"><span class="${done >= soll ? 'done-mark' : 'progress'}">${done}/${soll}</span><br>
           ${done < soll ? `<button class="btn small" data-act="give" data-id="${med.id}">✓ Gegeben</button>` : ''}</span>
@@ -1425,8 +1537,26 @@
       autoTable(doc, { ...tableBase, startY: y, head: [['Medikament', 'Dosis', 'Gabe', 'pro Tag', 'Zeitraum', 'Gaben erfasst', 'Grund / Notiz']],
         body: meds.map((m) => [m.mittel, m.dosis, label(APPLIKATION, m.applikation), String(m.proTag || 1),
           `${fmtD(m.start)} – ${m.abgesetzt ? fmtD(m.abgesetzt) + ' (abgesetzt)' : medEnde(m) ? fmtD(medEnde(m)) : 'offen'}`,
-          String(D.gaben.filter((g) => g.medId === m.id).length), [m.grund, m.verordnetVon ? 'verordnet: ' + m.verordnetVon : '', m.notiz].filter(Boolean).join(' · ')]) });
+          (() => { const b = medBilanz(m); return `${b.gegeben}${b.fehlend ? ` (${b.fehlend} fehlend)` : ''}`; })(),
+          [m.grund, m.verordnetVon ? 'verordnet: ' + m.verordnetVon : '', m.notiz].filter(Boolean).join(' · ')]) });
       y = endY() + 7;
+
+      // Gabenprotokoll: jede Gabe mit Zeitpunkt, fehlende Gaben rot markiert
+      const rows = [];
+      for (const m of meds) {
+        for (const d of medProtokoll(m)) {
+          d.gaben.forEach((g, k) => rows.push({ sort: g.zeit, cells: [fmtD(d.day), g.zeit.slice(11, 16), m.mittel, m.dosis, d.soll ? `${k + 1}/${d.soll}` : 'zusätzlich', g.notiz || ''], fehlt: false }));
+          if (d.fehlt && !d.heute) rows.push({ sort: d.day + 'T99', cells: [fmtD(d.day), '–', m.mittel, m.dosis, `FEHLT: ${d.fehlt} von ${d.soll}`, ''], fehlt: true });
+        }
+      }
+      rows.sort((a, b) => a.sort.localeCompare(b.sort));
+      if (rows.length) {
+        section('Gabenprotokoll');
+        const fehltIdx = new Set(rows.map((r, k) => (r.fehlt ? k : -1)).filter((k) => k >= 0));
+        autoTable(doc, { ...tableBase, startY: y, head: [['Datum', 'Uhrzeit', 'Medikament', 'Dosis', 'Gabe', 'Notiz']], body: rows.map((r) => r.cells),
+          didParseCell: (h) => { if (h.section === 'body' && fehltIdx.has(h.row.index)) { h.cell.styles.textColor = [179, 38, 30]; h.cell.styles.fontStyle = 'bold'; } } });
+        y = endY() + 7;
+      }
     } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Medikation.', M, y + 4); y += 10; }
 
     // Kotproben
@@ -1490,6 +1620,10 @@
     editWeight: (d) => { const w = D.gewichte.find((x) => x.id === d.id); if (w) weightForm(w.igelId, w); },
     addMed: (d) => medForm(d.id),
     editMed: (d) => { const m = D.medikation.find((x) => x.id === d.id); if (m) medForm(m.igelId, m); },
+    openMed: (d) => { const m = D.medikation.find((x) => x.id === d.id); if (m) go({ name: 'med', id: m.id, igelId: m.igelId }); },
+    addGabe: (d) => { const m = D.medikation.find((x) => x.id === d.id); if (m) gabeForm({ med: m, day: d.day || null }); },
+    editGabe: (d) => { const g = D.gaben.find((x) => x.id === d.id); if (g) gabeForm({ gabe: g }); },
+    gabenAlle: () => { ui.gabenAlle = true; render(); },
     give: (d) => give(d.id),
     undoGive: (d) => undoGive(d.id),
     addBefund: (d) => befundForm(d.id),
