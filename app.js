@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
@@ -20,7 +20,7 @@
   const BEFALL = [['', '–'], ['gering', 'gering'], ['mittel', 'mittel'], ['stark', 'stark']];
   const GEFRESSEN = [['alles', 'alles'], ['fast', 'fast alles'], ['haelfte', 'etwa die Hälfte'], ['wenig', 'wenig'], ['nichts', 'nichts'], ['offen', 'nicht kontrolliert']];
   const FUTTER_VORSCHLAEGE = ['Katzenfutter (Nass)', 'Katzen-Trockenfutter', 'Igel-Trockenfutter', 'Rührei (ungewürzt)', 'Hähnchen gekocht', 'Insekten', 'Aufzuchtmilch'];
-  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null };
+  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null };
 
   // ---------- Zustand ----------
   let db;
@@ -105,6 +105,11 @@
     for (const s of DATA_STORES) D[s] = await dbAll(s);
     const st = (await dbAll('settings')).find((x) => x.id === 'main');
     S = { ...DEFAULTS, ...(st || {}) };
+    // Listen beim ersten Start anlegen (Futterliste mit Vorschlägen, Medikamentenliste leer)
+    let init = false;
+    if (!Array.isArray(S.medListe)) { S.medListe = []; init = true; }
+    if (!Array.isArray(S.futterListe)) { S.futterListe = FUTTER_VORSCHLAEGE.map((name) => ({ id: uid(), name, menge: null, updatedAt: new Date().toISOString() })); init = true; }
+    if (init) await saveSettings();
   }
   async function deleteIgel(id) {
     for (const s of DATA_STORES) {
@@ -261,6 +266,8 @@
       view.innerHTML = viewDetail(i);
     }
     else if (r.name === 'heute') { setTab('heute'); view.innerHTML = viewHeute(); }
+    else if (r.name === 'medliste') { setTab('einstellungen'); view.innerHTML = viewMedListe(); }
+    else if (r.name === 'futterliste') { setTab('einstellungen'); view.innerHTML = viewFutterListe(); }
     else if (r.name === 'statistik') { setTab('einstellungen'); view.innerHTML = viewStatistik(); }
     else if (r.name === 'einstellungen') { setTab('einstellungen'); view.innerHTML = viewSettings(); fillStorageInfo(); }
     updateBadge();
@@ -518,6 +525,65 @@
     return html;
   }
 
+  // ---------- Ansicht: Medikamenten- und Futterliste ----------
+  function viewMedListe() {
+    setHeader('Medikamentenliste', { back: true, action: { label: '＋', aria: 'Medikament hinzufügen', fn: () => medListeForm() } });
+    const l = byName(S.medListe);
+    return `<p class="note">Vorlagen für die Medikation. Beim Eintragen einer Medikation wählst du ein Medikament aus der Liste, dann werden Dosis, Verabreichung, Gaben pro Tag und Dauer vorbelegt. Die Werte bleiben im Formular änderbar.</p>` +
+      (l.length ? `<div class="list">${l.map((m) => `<button class="row" data-act="editMedListe" data-id="${m.id}"><span class="grow"><span class="t">${esc(m.name)}</span><br>
+        <span class="s">${[m.dosis, m.applikation ? label(APPLIKATION, m.applikation) : '', m.proTag ? `${m.proTag}× tägl.` : '', m.tage ? `${m.tage} Tage` : ''].filter(Boolean).map(esc).join(' · ') || 'keine Vorgaben'}</span>
+        ${m.hinweis ? `<br><span class="s">ℹ️ ${esc(m.hinweis)}</span>` : ''}</span><span class="chev">›</span></button>`).join('')}</div>`
+        : `<div class="empty">Noch keine Medikamente angelegt.<br><br><button class="btn" data-act="addMedListe" style="max-width:260px">Medikament anlegen</button></div>`);
+  }
+  function viewFutterListe() {
+    setHeader('Futterliste', { back: true, action: { label: '＋', aria: 'Futter hinzufügen', fn: () => futterListeForm() } });
+    const l = byName(S.futterListe);
+    return `<p class="note">Futtersorten zur Auswahl beim Füttern. Ist eine Standardmenge hinterlegt, wird sie automatisch vorbelegt.</p>` +
+      (l.length ? `<div class="list">${l.map((f) => `<button class="row" data-act="editFutterListe" data-id="${f.id}"><span class="grow"><span class="t">${esc(f.name)}</span>${f.notiz ? `<br><span class="s">${esc(f.notiz)}</span>` : ''}</span>
+        <span class="r">${f.menge != null ? `${fmtNum(f.menge)} g` : ''}</span><span class="chev">›</span></button>`).join('')}</div>`
+        : `<div class="empty">Noch keine Futtersorten angelegt.<br><br><button class="btn" data-act="addFutterListe" style="max-width:260px">Futter anlegen</button></div>`);
+  }
+  function listItemForm({ listKey, item, title, fields, deleteLabel }) {
+    openForm({
+      title, groups: [fields], values: item || {},
+      onSave: async (v) => {
+        if (S[listKey].some((x) => x.id !== item?.id && x.name.trim().toLowerCase() === v.name.trim().toLowerCase())) { toast(`„${v.name}“ steht schon in der Liste.`); return false; }
+        const obj = { ...(item || { id: uid() }), ...v, updatedAt: new Date().toISOString() };
+        const k = S[listKey].findIndex((x) => x.id === obj.id);
+        if (k >= 0) S[listKey][k] = obj; else S[listKey].push(obj);
+        await saveSettings(); toast('Gespeichert'); return true;
+      },
+      onDelete: item ? async () => {
+        if (!confirm(`„${item.name}“ aus der Liste entfernen?\n\nBereits eingetragene Medikationen/Fütterungen bleiben erhalten.`)) return false;
+        S[listKey] = S[listKey].filter((x) => x.id !== item.id); await saveSettings(); return true;
+      } : null,
+      deleteLabel
+    });
+  }
+  function medListeForm(m = null) {
+    listItemForm({
+      listKey: 'medListe', item: m, title: m ? 'Medikament bearbeiten' : 'Neues Medikament', deleteLabel: 'Aus Liste entfernen',
+      fields: [
+        { key: 'name', label: 'Name (inkl. Stärke, z. B. „Baytril 2,5 %“)', required: true },
+        { key: 'dosis', label: 'Standard-Dosis', placeholder: 'z. B. 0,1 ml' },
+        { key: 'applikation', label: 'Verabreichung', type: 'select', options: opts(APPLIKATION), default: 'oral' },
+        { key: 'proTag', label: 'Gaben pro Tag', type: 'number', default: 1 },
+        { key: 'tage', label: 'Standard-Dauer in Tagen (leer = offen)', type: 'number' },
+        { key: 'hinweis', label: 'Hinweis (wird beim Auswählen angezeigt)', type: 'textarea' }
+      ]
+    });
+  }
+  function futterListeForm(f = null) {
+    listItemForm({
+      listKey: 'futterListe', item: f, title: f ? 'Futter bearbeiten' : 'Neues Futter', deleteLabel: 'Aus Liste entfernen',
+      fields: [
+        { key: 'name', label: 'Futtersorte', required: true },
+        { key: 'menge', label: 'Standardmenge (g, optional)', type: 'number' },
+        { key: 'notiz', label: 'Notiz (z. B. Marke, Bezugsquelle)' }
+      ]
+    });
+  }
+
   // ---------- Ansicht: Statistik ----------
   function statYears() {
     const ys = new Set(D.igel.map((i) => (i.aufnahmeDatum || '').slice(0, 4)).filter(Boolean));
@@ -597,6 +663,11 @@
     const counts = DATA_STORES.reduce((a, s) => ((a[s] = D[s].length), a), {});
     return `
       <button class="btn secondary" data-act="statistik" style="margin-top:4px">📊 Jahresstatistik</button>
+      <div class="section-title">Listen</div>
+      <div class="list">
+        <button class="row" data-act="medliste"><span class="grow"><span class="t">💊 Medikamentenliste</span><br><span class="s">Vorlagen mit Dosis, Verabreichung, Dauer</span></span><span class="r">${S.medListe.length}</span><span class="chev">›</span></button>
+        <button class="row" data-act="futterliste"><span class="grow"><span class="t">🍽️ Futterliste</span><br><span class="s">Futtersorten mit Standardmenge</span></span><span class="r">${S.futterListe.length}</span><span class="chev">›</span></button>
+      </div>
       <div class="section-title">Pflegestelle (erscheint im PDF)</div>
       <div class="form">
         <label class="field"><span>Name der Pflegestelle</span><input id="s_pflegestelle" value="${esc(S.pflegestelle)}"></label>
@@ -704,7 +775,8 @@
     let input;
     switch (f.type) {
       case 'textarea': input = `<textarea id="${id}" rows="3">${esc(val)}</textarea>`; break;
-      case 'select': input = `<select id="${id}">${f.options.map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`; break;
+      case 'pick': input = `<select id="${id}" data-pick="${esc(f.pick)}"><option value="">– auswählen –</option>${f.options.map((o) => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join('')}</select>`; break;
+      case 'select': input =`<select id="${id}">${f.options.map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`; break;
       case 'checks': {
         const arr = Array.isArray(val) ? val : [];
         input = `<div class="checks" id="${id}">${f.options.map((o) => {
@@ -825,23 +897,58 @@
   }
 
   // ---------- Formulare: Medikation ----------
+  const byName = (l) => (l || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  const listHas = (l, name) => (l || []).some((x) => x.name.trim().toLowerCase() === String(name || '').trim().toLowerCase());
+  function medPickField() {
+    return S.medListe.length
+      ? [{ key: 'vorlage', label: 'Aus Medikamentenliste wählen', type: 'pick', pick: 'med', options: byName(S.medListe).map((x) => ({ v: x.id, l: x.name + (x.dosis ? ` – ${x.dosis}` : '') })) }]
+      : [];
+  }
+  function futterPickField() {
+    return S.futterListe.length
+      ? [{ key: 'vorlage', label: 'Aus Futterliste wählen', type: 'pick', pick: 'futter', options: byName(S.futterListe).map((x) => ({ v: x.id, l: x.name + (x.menge != null ? ` – ${fmtNum(x.menge)} g` : '') })) }]
+      : [];
+  }
+  const merkenField = (txt) => ({ key: 'merken', label: 'Liste', type: 'checks', options: [{ v: 'ja', l: txt }] });
+  // Ausgewählten Listeneintrag in die Formularfelder übernehmen (Felder bleiben änderbar)
+  function applyPick(kind, id) {
+    const set = (k, v) => { const el = $('#f_' + k); if (!el || v === undefined) return; el.value = v == null ? '' : (typeof v === 'number' ? String(v).replace('.', ',') : v); };
+    if (kind === 'med') {
+      const m = S.medListe.find((x) => x.id === id); if (!m) return;
+      set('mittel', m.name); set('dosis', m.dosis || ''); set('applikation', m.applikation || 'oral'); set('proTag', m.proTag || 1); set('tage', m.tage ?? null);
+      if (m.hinweis) toast(`Hinweis: ${m.hinweis}`, 5000);
+    }
+    if (kind === 'futter') {
+      const f = S.futterListe.find((x) => x.id === id); if (!f) return;
+      set('futter', f.name); if (f.menge != null) set('menge', f.menge);
+    }
+  }
+  async function addToList(listKey, item) {
+    if (!item.name || listHas(S[listKey], item.name)) return false;
+    S[listKey].push({ id: uid(), updatedAt: new Date().toISOString(), ...item }); await saveSettings(); return true;
+  }
+
   function medForm(igelId, m = null) {
     openForm({
       title: m ? 'Medikation bearbeiten' : 'Neue Medikation',
       groups: [
-        [{ key: 'mittel', label: 'Medikament', required: true }, { key: 'grund', label: 'Grund / Indikation' },
+        [...medPickField(), { key: 'mittel', label: 'Medikament', required: true }, { key: 'grund', label: 'Grund / Indikation' },
          { key: 'dosis', label: 'Dosis', required: true, placeholder: 'z. B. 0,1 ml' },
          { key: 'applikation', label: 'Verabreichung', type: 'select', options: opts(APPLIKATION), default: 'oral' },
          { key: 'proTag', label: 'Gaben pro Tag', type: 'number', required: true, default: 1 }],
         [{ key: 'start', label: 'Beginn', type: 'date', required: true, default: today() },
          { key: 'tage', label: 'Dauer in Tagen (leer = bis abgesetzt)', type: 'number' },
          { key: 'abgesetzt', label: 'Vorzeitig abgesetzt am', type: 'date' },
-         { key: 'verordnetVon', label: 'Verordnet von (Tierarzt)' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }]
+         { key: 'verordnetVon', label: 'Verordnet von (Tierarzt)' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }],
+        ...(m ? [] : [[merkenField('Als Vorlage in die Medikamentenliste aufnehmen (falls neu)')]])
       ],
       values: m || {},
       onSave: async (v) => {
         v.proTag = Math.max(1, Math.round(v.proTag || 1)); if (v.tage != null) v.tage = Math.max(1, Math.round(v.tage));
-        await save('medikation', { ...(m || { igelId }), ...v }); toast('Medikation gespeichert'); return true;
+        const merken = (v.merken || []).includes('ja'); delete v.merken; delete v.vorlage;
+        await save('medikation', { ...(m || { igelId }), ...v });
+        const neu = merken && await addToList('medListe', { name: v.mittel, dosis: v.dosis, applikation: v.applikation, proTag: v.proTag, tage: v.tage });
+        toast(neu ? 'Medikation gespeichert · in Liste aufgenommen' : 'Medikation gespeichert'); return true;
       },
       onDelete: m ? async () => {
         if (!confirm('Medikation inkl. aller eingetragenen Gaben löschen?')) return false;
@@ -898,13 +1005,19 @@
       title: f ? 'Fütterung bearbeiten' : `Fütterung – ${igelName(igelById(igelId))}`,
       groups: [[
         { key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() },
-        { key: 'futter', label: 'Futter', required: true, list: FUTTER_VORSCHLAEGE, default: f ? '' : last?.futter || '' },
+        ...futterPickField(),
+        { key: 'futter', label: 'Futter', required: true, list: S.futterListe.map((x) => x.name), default: f ? '' : last?.futter || '' },
         { key: 'menge', label: 'Menge (g)', type: 'number', default: f ? '' : last?.menge ?? '' },
         { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' },
         { key: 'notiz', label: 'Notiz (Kot, Trinken, Auffälligkeiten)' }
-      ]],
+      ], ...(f ? [] : [[merkenField('In die Futterliste aufnehmen (falls neu)')]])],
       values: f || {},
-      onSave: async (v) => { await save('futter', { ...(f || { igelId }), ...v }); toast('Fütterung gespeichert'); return true; },
+      onSave: async (v) => {
+        const merken = (v.merken || []).includes('ja'); delete v.merken; delete v.vorlage;
+        await save('futter', { ...(f || { igelId }), ...v });
+        const neu = merken && await addToList('futterListe', { name: v.futter, menge: v.menge });
+        toast(neu ? 'Fütterung gespeichert · in Liste aufgenommen' : 'Fütterung gespeichert'); return true;
+      },
       onDelete: f ? async () => { if (!confirm('Eintrag löschen?')) return false; await remove('futter', f.id); return true; } : null
     });
   }
@@ -956,13 +1069,16 @@
       title: 'Alle füttern',
       groups: [
         [{ key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() },
-         { key: 'futter', label: 'Futter', required: true, list: FUTTER_VORSCHLAEGE, default: lastF?.futter || '' },
+         ...futterPickField(),
+         { key: 'futter', label: 'Futter', required: true, list: S.futterListe.map((x) => x.name), default: lastF?.futter || '' },
          { key: 'menge', label: 'Menge pro Igel (g)', type: 'number', default: lastF?.menge ?? '' },
          { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' }],
-        [{ key: 'igel', label: 'Gefüttert wurden', type: 'checks', required: true, options: list.map((i) => ({ v: i.id, l: igelName(i) + (i.box ? ` (Box ${i.box})` : '') })), default: list.map((i) => i.id) }]
+        [{ key: 'igel', label: 'Gefüttert wurden', type: 'checks', required: true, options: list.map((i) => ({ v: i.id, l: igelName(i) + (i.box ? ` (Box ${i.box})` : '') })), default: list.map((i) => i.id) }],
+        [merkenField('In die Futterliste aufnehmen (falls neu)')]
       ],
       onSave: async (v) => {
         for (const id of v.igel) await save('futter', { igelId: id, datum: v.datum, futter: v.futter, menge: v.menge, gefressen: v.gefressen });
+        if ((v.merken || []).includes('ja')) await addToList('futterListe', { name: v.futter, menge: v.menge });
         toast(`Fütterung für ${v.igel.length} Igel eingetragen`); return true;
       }
     });
@@ -1088,6 +1204,19 @@
           }
           os.put(s === 'fotos' ? { ...rec, full: b64ToBuf(rec.full), thumb: b64ToBuf(rec.thumb) } : rec);
         }
+      }
+      if (mode === 'merge' && obj.settings) {
+        // Listen zusammenführen: gleiche ID → neuere Änderung gewinnt; gleicher Name → nicht doppelt anlegen
+        const mergeList = (lokal, fremd) => {
+          const out = (lokal || []).slice();
+          for (const x of fremd || []) {
+            const k = out.findIndex((y) => y.id === x.id);
+            if (k >= 0) { if ((x.updatedAt || '') > (out[k].updatedAt || '')) out[k] = x; }
+            else if (!listHas(out, x.name)) out.push(x);
+          }
+          return out;
+        };
+        t.objectStore('settings').put({ ...S, medListe: mergeList(S.medListe, obj.settings.medListe), futterListe: mergeList(S.futterListe, obj.settings.futterListe) });
       }
       if (mode === 'replace' && obj.settings) t.objectStore('settings').put({ ...DEFAULTS, ...obj.settings, id: 'main', lastBackup: dStr(new Date(obj.exportedAt)) });
       await txDone(t);
@@ -1274,6 +1403,12 @@
     bulkWeigh: () => bulkWeighSheet(),
     bulkFeed: () => bulkFeedSheet(),
     statistik: () => go({ name: 'statistik' }),
+    medliste: () => go({ name: 'medliste' }),
+    futterliste: () => go({ name: 'futterliste' }),
+    addMedListe: () => medListeForm(),
+    editMedListe: (d) => { const m = S.medListe.find((x) => x.id === d.id); if (m) medListeForm(m); },
+    addFutterListe: () => futterListeForm(),
+    editFutterListe: (d) => { const f = S.futterListe.find((x) => x.id === d.id); if (f) futterListeForm(f); },
     statJahr: (d) => { ui.statJahr = d.v; render(); },
     csv: () => csvExport(ui.statJahr),
     backup: () => makeBackup(),
@@ -1338,6 +1473,7 @@
         e.target.blur();
       }
     });
+    $('#sheet').addEventListener('change', (e) => { const p = e.target.dataset && e.target.dataset.pick; if (p && e.target.value) applyPick(p, e.target.value); });
     $('#sheet').addEventListener('input', (e) => { if (e.target.dataset && e.target.dataset.bw) updateBulkDiff(e.target); });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', fitSheet);
