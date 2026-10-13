@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
@@ -510,13 +510,51 @@
   function openSheet({ title, body, saveLabel = 'Sichern', onSave = null, cancelLabel = 'Abbrechen', onOpen = null }) {
     const sh = $('#sheet');
     sh.innerHTML = `<div class="sheet-head"><button class="cancel" data-sheet="cancel">${esc(cancelLabel)}</button><h3>${esc(title)}</h3>${onSave ? `<button class="save" data-sheet="save">${esc(saveLabel)}</button>` : ''}</div>${body}`;
+    const wasOpen = !sh.hidden;
     sh.hidden = false; $('#sheetBackdrop').hidden = false;
-    document.body.style.overflow = 'hidden';
+    if (!wasOpen) lockBody();
     sh.scrollTop = 0;
     sh._onSave = onSave;
+    fitSheet();
     if (onOpen) onOpen(sh);
   }
-  function closeSheet() { const sh = $('#sheet'); sh.hidden = true; sh.innerHTML = ''; sh._onSave = null; sh._onDelete = null; sh._share = null; $('#sheetBackdrop').hidden = true; document.body.style.overflow = ''; }
+  function closeSheet() {
+    const sh = $('#sheet');
+    if (document.activeElement && sh.contains(document.activeElement)) document.activeElement.blur();
+    sh.hidden = true; sh.innerHTML = ''; sh._onSave = null; sh._onDelete = null; sh._share = null;
+    sh.style.top = ''; sh.style.height = '';
+    $('#sheetBackdrop').hidden = true;
+    unlockBody();
+  }
+  // iOS: Seite hinter dem Formular festhalten, damit sie beim Öffnen der Tastatur nicht verrutscht
+  let lockedScrollY = 0;
+  function lockBody() {
+    lockedScrollY = window.scrollY || 0;
+    document.body.style.top = `-${lockedScrollY}px`;
+    document.body.classList.add('sheet-open');
+  }
+  function unlockBody() {
+    if (!document.body.classList.contains('sheet-open')) return;
+    document.body.classList.remove('sheet-open');
+    document.body.style.top = '';
+    window.scrollTo(0, lockedScrollY);
+  }
+  // Formular immer exakt in den sichtbaren Bereich legen (oberhalb der Tastatur)
+  function fitSheet() {
+    const sh = $('#sheet'); if (!sh || sh.hidden) return;
+    const vv = window.visualViewport;
+    if (vv) { sh.style.top = `${Math.max(0, vv.offsetTop)}px`; sh.style.height = `${vv.height}px`; }
+  }
+  function revealField(el) {
+    const sh = $('#sheet'); if (!el || !sh.contains(el)) return;
+    setTimeout(() => {
+      fitSheet();
+      const head = $('.sheet-head', sh); const headH = head ? head.offsetHeight : 0;
+      const r = el.getBoundingClientRect(); const sr = sh.getBoundingClientRect();
+      const top = r.top - sr.top; const visible = sh.clientHeight;
+      if (top < headH + 8 || r.bottom - sr.top > visible - 12) sh.scrollTop += top - headH - Math.max(40, (visible - headH - r.height) / 3);
+    }, 350);
+  }
 
   function fieldHtml(f, v) {
     const id = 'f_' + f.key;
@@ -547,7 +585,8 @@
   function openForm({ title, groups, values = {}, onSave, onDelete = null, deleteLabel = 'Eintrag löschen' }) {
     const allFields = groups.flat();
     const body = groups.map((g) => `<div class="form">${g.map((f) => fieldHtml(f, values[f.key])).join('')}</div>`).join('') +
-      (onDelete ? `<button class="btn danger" data-sheet="delete">${esc(deleteLabel)}</button>` : '');
+      `<button class="btn btn-save-bottom" data-sheet="save">Sichern</button>` +
+      (onDelete ?`<button class="btn danger" data-sheet="delete">${esc(deleteLabel)}</button>` : '');
     openSheet({
       title, body,
       onSave: async () => {
@@ -983,10 +1022,11 @@
   const sheetActions = {
     cancel: () => closeSheet(),
     save: async (el, sh) => {
-      if (!sh._onSave || el.disabled) return; el.disabled = true;
+      if (!sh._onSave || sh._saving) return; sh._saving = true;
+      if (document.activeElement && sh.contains(document.activeElement)) document.activeElement.blur();
       try { const r = await sh._onSave(); if (r === true) { closeSheet(); render(); } }
       catch (e) { console.error(e); toast('Fehler beim Speichern: ' + e.message, 5000); }
-      finally { el.disabled = false; }
+      finally { sh._saving = false; }
     },
     delete: async (el, sh) => { if (!sh._onDelete) return; const r = await sh._onDelete(); if (r === true) { closeSheet(); render(); toast('Gelöscht'); } },
     share: async (el, sh) => { if (sh._share) await sh._share(); },
@@ -1011,6 +1051,16 @@
       const el = e.target.closest('[data-sheet]'); if (!el) return;
       e.preventDefault(); const fn = sheetActions[el.dataset.sheet]; if (fn) fn(el, $('#sheet'));
     });
+    $('#sheet').addEventListener('focusin', (e) => { if (e.target.matches('input, select, textarea')) revealField(e.target.closest('.field') || e.target); });
+    $('#sheet').addEventListener('keydown', (e) => {
+      // Return in einem einzeiligen Feld schließt nur die Tastatur
+      if (e.key === 'Enter' && e.target.matches('input:not([type=checkbox])')) { e.preventDefault(); e.target.blur(); }
+    });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', fitSheet);
+      window.visualViewport.addEventListener('scroll', fitSheet);
+    }
+    window.addEventListener('resize', fitSheet);
     $('#sheetBackdrop').addEventListener('click', closeSheet);
     $('#btnBack').addEventListener('click', back);
     $$('.tabbar button').forEach((b) => b.addEventListener('click', () => {
