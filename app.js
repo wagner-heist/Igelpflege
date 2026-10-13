@@ -5,10 +5,13 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
 
   // ---------- Konstanten ----------
-  const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
+  const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'rechnungen', 'settings'];
+  const KATEGORIEN = [['tierarzt', 'Tierarzt'], ['medikamente', 'Medikamente'], ['futter', 'Futter'], ['material', 'Material / Zubehör'], ['sonstiges', 'Sonstiges']];
+  const BEZAHLT = [['ja', 'bezahlt'], ['nein', 'offen (noch nicht bezahlt)']];
+  const ERSTATTUNG = [['', 'keine'], ['beantragt', 'beantragt'], ['erstattet', 'erstattet']];
   const DATA_STORES = STORES.filter((s) => s !== 'settings');
   const STATUS = [['aufnahme', 'Aufnahme'], ['pflege', 'In Pflege'], ['winterschlaf', 'Winterschlaf'], ['ausgewildert', 'Ausgewildert'], ['weitergegeben', 'Weitergegeben'], ['verstorben', 'Verstorben']];
   const STATUS_L = Object.fromEntries(STATUS);
@@ -68,7 +71,7 @@
   // ---------- Datenbank ----------
   function openDB() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('igelpflege', 1);
+      const r = indexedDB.open('igelpflege', 2); // v2: Store "rechnungen"
       r.onupgradeneeded = () => {
         const d = r.result;
         for (const s of STORES) {
@@ -112,6 +115,8 @@
     if (init) await saveSettings();
   }
   async function deleteIgel(id) {
+    // Rechnungen bleiben erhalten, der Igel wird nur aus der Zuordnung entfernt
+    for (const r of D.rechnungen.filter((x) => (x.igelIds || []).includes(id))) await save('rechnungen', { ...r, igelIds: r.igelIds.filter((x) => x !== id) });
     for (const s of DATA_STORES) {
       if (s === 'igel') continue;
       await removeMany(s, D[s].filter((x) => x.igelId === id).map((x) => x.id));
@@ -270,6 +275,7 @@
     const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
     let p = parent ? { name: parent } : (ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' });
     if (ui.route.name === 'finder' && ui.prev && ui.prev.name === 'detail') p = ui.prev; // vom Igel aus geöffnet → zurück zum Igel
+    if (ui.route.name === 'rechnung') p = ui.prev && ui.prev.name === 'detail' ? ui.prev : { name: 'rechnungen' };
     if (ui.route.name === 'med') { ui.prev = null; ui.detailTab = 'medizin'; return go({ name: 'detail', id: ui.route.igelId }, { keepPrev: true, keepTab: true }); }
     ui.prev = null; go(p, { keepPrev: true });
   }
@@ -293,6 +299,12 @@
       view.innerHTML = viewDetail(i);
     }
     else if (r.name === 'heute') { setTab('heute'); view.innerHTML = viewHeute(); }
+    else if (r.name === 'rechnungen') { setTab('rechnungen'); view.innerHTML = viewRechnungen(); }
+    else if (r.name === 'rechnung') {
+      const re = D.rechnungen.find((x) => x.id === r.id);
+      if (!re) { ui.route = { name: 'rechnungen' }; return render(); }
+      setTab(ui.prev && ui.prev.name === 'detail' ? 'igel' : 'rechnungen'); view.innerHTML = viewRechnung(re);
+    }
     else if (r.name === 'med') {
       const m = D.medikation.find((x) => x.id === r.id);
       if (!m) { ui.route = r.igelId ? { name: 'detail', id: r.igelId } : { name: 'list' }; ui.detailTab = 'medizin'; return render(); }
@@ -398,6 +410,11 @@
         ${ps.slice().reverse().map((f) => `<img src="${photoUrl(f)}" alt="" data-act="photo" data-id="${f.id}">`).join('')}
       </div>
       ${winterHtml}
+      ${(() => {
+        const res = rechnungenOf(i.id); const sum = res.reduce((s, r) => s + anteil(r), 0);
+        return `<div class="section-title">Kosten${res.length ? ` · ${euro(sum)}` : ''} <button class="link" data-act="addRechnungIgel" data-id="${i.id}">＋ Rechnung</button></div>
+          ${res.length ? `<div class="list">${res.map(rechnungRow).join('')}</div>${res.some((r) => (r.igelIds || []).length > 1) ? '<p class="note">Rechnungen für mehrere Igel zählen anteilig.</p>' : ''}` : '<div class="card note">Noch keine Rechnungen zugeordnet.</div>'}`;
+      })()}
       <div class="section-title">Daten</div>
       <div class="card">${kv.length ? `<dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === 'Kontakt Finder' ? kontaktLinks(String(v).split(/[,;]/).map((x) => x.trim()).filter(Boolean)) : esc(v)}</dd>`).join('')}</dl>` : '<span class="note">Keine weiteren Daten.</span>'}
         ${i.finderName || i.finderKontakt ? `<p style="margin:10px 0 0"><button class="link" data-act="openFinder" data-key="${esc(finderKey(i))}">👤 Finder anzeigen${(() => { const n = finderList().find((f) => f.key === finderKey(i))?.igel.length || 0; return n > 1 ? ` (${n} Igel)` : ''; })()}</button></p>` : ''}</div>
@@ -537,7 +554,7 @@
       ${ta.length ? `<div class="list">${ta.map((v) => `<button class="row" data-act="editVet" data-id="${v.id}">
         <span class="grow"><span class="t">${fmtD(v.datum)}</span> <span class="s">${esc(v.praxis || '')}</span><br>
         <span class="s">${esc(v.grund || '')}${v.diagnose ? ' · ' + esc(v.diagnose) : ''}${v.naechsterTermin ? ' · nächster Termin ' + fmtD(v.naechsterTermin) : ''}</span></span>
-        ${v.kosten != null ? `<span class="r">${fmtNum(v.kosten, 2)} €</span>` : ''}<span class="chev">›</span></button>`).join('')}</div>` : '<div class="card note">Noch kein Tierarztbesuch eingetragen.</div>'}`;
+        ${v.kosten != null ? `<span class="r">${fmtNum(v.kosten, 2)} €${D.rechnungen.some((r) => r.tierarztId === v.id) ? '<br>🧾' : ''}</span>` : ''}<span class="chev">›</span></button>`).join('')}</div>` : '<div class="card note">Noch kein Tierarztbesuch eingetragen.</div>'}`;
   }
 
   function detailFutter(i) {
@@ -841,6 +858,13 @@
       <div class="card"><div class="stats" style="margin-top:0">
         ${tile(s.besuche, 'Besuche')}${tile(fmtNum(s.kosten, 2) + ' €', 'Kosten')}${tile(s.besuche ? fmtNum(s.kosten / s.besuche, 2) + ' €' : '–', 'Ø pro Besuch')}
       </div></div>
+      ${(() => {
+        const re = D.rechnungen.filter((r) => J === 'alle' || r.datum.startsWith(J)); if (!re.length) return '';
+        const sum = re.reduce((x, r) => x + (r.betrag || 0), 0); const fall = s.aufnahmen ? sum / s.aufnahmen : null;
+        return `<div class="section-title">Rechnungen ${J === 'alle' ? 'gesamt' : J}</div><div class="card"><div class="stats" style="margin-top:0">
+          ${tile(euro(sum), `Summe (${re.length})`)}${tile(euro(re.filter((r) => r.erstattung === 'erstattet').reduce((x, r) => x + r.betrag, 0)), 'erstattet', 'up')}${tile(fall != null ? euro(fall) : '–', 'Ø pro Aufnahme')}
+        </div><dl class="kv" style="margin-top:12px">${KATEGORIEN.map(([k, l]) => [l, re.filter((r) => r.kategorie === k).reduce((x, r) => x + r.betrag, 0)]).filter(([, v]) => v).map(([l, v]) => `<dt>${esc(l)}</dt><dd>${euro(v)}</dd>`).join('')}</dl></div>`;
+      })()}
       <button class="btn secondary" data-act="csv">📄 Igel-Liste ${J === 'alle' ? 'gesamt' : J} als CSV (Excel/Numbers)</button>`;
   }
   function csvCell(v) {
@@ -981,7 +1005,8 @@
     let input;
     switch (f.type) {
       case 'textarea': input = `<textarea id="${id}" rows="3">${esc(val)}</textarea>`; break;
-      case 'pick': input = `<select id="${id}" data-pick="${esc(f.pick)}"><option value="">– auswählen –</option>${f.options.map((o) => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join('')}</select>`; break;
+      case 'files': input = `<input id="${id}" type="file" accept="image/*,application/pdf" multiple class="file-in">`; break;
+      case 'pick': input =`<select id="${id}" data-pick="${esc(f.pick)}"><option value="">– auswählen –</option>${f.options.map((o) => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join('')}</select>`; break;
       case 'select': input =`<select id="${id}">${f.options.map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`; break;
       case 'checks': {
         const arr = Array.isArray(val) ? val : [];
@@ -1001,6 +1026,7 @@
     const el = $('#f_' + f.key);
     if (!el) return undefined;
     if (f.type === 'checks') return $$('input:checked', el).map((x) => x.value);
+    if (f.type === 'files') return Array.from(el.files || []);
     if (f.type === 'number') return num(el.value);
     return el.value.trim();
   }
@@ -1194,6 +1220,7 @@
 
   // ---------- Formulare: Tierarzt ----------
   function vetForm(igelId, v0 = null) {
+    const linked = v0 ? D.rechnungen.find((r) => r.tierarztId === v0.id) : null;
     const lastPraxis = D.tierarzt.slice().sort((a, b) => b.datum.localeCompare(a.datum))[0]?.praxis || '';
     openForm({
       title: v0 ? 'Tierarztbesuch bearbeiten' : 'Tierarztbesuch',
@@ -1201,10 +1228,25 @@
         [{ key: 'datum', label: 'Datum', type: 'date', required: true, default: today() }, { key: 'praxis', label: 'Praxis / Tierarzt', default: v0 ? '' : lastPraxis },
          { key: 'grund', label: 'Grund des Besuchs', required: true }],
         [{ key: 'diagnose', label: 'Befund / Diagnose', type: 'textarea' }, { key: 'behandlung', label: 'Behandlung', type: 'textarea' }],
-        [{ key: 'kosten', label: 'Kosten (€)', type: 'number' }, { key: 'naechsterTermin', label: 'Nächster Termin', type: 'date' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }]
+        [{ key: 'kosten', label: 'Kosten (€)', type: 'number' }, { key: 'naechsterTermin', label: 'Nächster Termin', type: 'date' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }],
+        ...(linked ? [] : [[
+          { key: 'alsRechnung', label: 'Rechnung', type: 'checks', options: [{ v: 'ja', l: 'Kosten auch unter „Rechnungen“ erfassen' }], default: v0 ? [] : ['ja'] },
+          { key: 'dateien', label: 'Rechnung fotografieren / Foto oder PDF wählen (optional)', type: 'files' }
+        ]])
       ],
       values: v0 || {},
-      onSave: async (v) => { await save('tierarzt', { ...(v0 || { igelId }), ...v }); toast('Tierarztbesuch gespeichert'); return true; },
+      onSave: async (v) => {
+        const alsRechnung = (v.alsRechnung || []).includes('ja'); const files = v.dateien || [];
+        delete v.alsRechnung; delete v.dateien;
+        if (alsRechnung && !(v.kosten > 0) && files.length) { toast('Für die Rechnung bitte Kosten eintragen.'); return false; }
+        const visit = await save('tierarzt', { ...(v0 || { igelId }), ...v });
+        if (alsRechnung && v.kosten > 0) {
+          const r = await save('rechnungen', { tierarztId: visit.id, datum: v.datum, aussteller: v.praxis, kategorie: 'tierarzt', betrag: v.kosten, igelIds: [visit.igelId], bezahlt: 'ja', erstattung: '', notiz: v.grund });
+          const n = await saveBelege(r.id, files);
+          toast(`Tierarztbesuch + Rechnung gespeichert${n ? ` · ${n} ${n === 1 ? 'Beleg' : 'Belege'}` : ''}`); return true;
+        }
+        toast('Tierarztbesuch gespeichert'); return true;
+      },
       onDelete: v0 ? async () => { if (!confirm('Tierarztbesuch löschen?')) return false; await remove('tierarzt', v0.id); return true; } : null
     });
   }
@@ -1342,6 +1384,188 @@
           <button class="btn danger" data-sheet="photoDel" data-id="${p.id}">Löschen</button>
         </div>`
     });
+  }
+
+  // Datei (Foto oder PDF) für die Ablage aufbereiten
+  async function processFile(file) {
+    const datum = file.lastModified ? dtStr(new Date(file.lastModified)) : nowDT();
+    if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {
+      if (file.size > 15 * 1048576) throw new Error('PDF größer als 15 MB');
+      return { datum, type: 'application/pdf', full: await file.arrayBuffer(), thumb: null, name: file.name || 'Beleg.pdf' };
+    }
+    const img = await loadImage(file);
+    const full = await scaled(img, 2000, 0.85); const thumb = await scaled(img, 360, 0.75); // Belege etwas größer, damit lesbar
+    return { datum, type: 'image/jpeg', full: full.buf, thumb: thumb.buf, w: full.w, h: full.h };
+  }
+  async function saveBelege(rechnungId, files) {
+    let ok = 0;
+    for (const f of files || []) {
+      try { await save('fotos', { igelId: null, rechnungId, kind: 'beleg', ...(await processFile(f)) }); ok++; }
+      catch (e) { console.error(e); toast(`Beleg „${f.name}“: ${e.message}`, 4000); }
+    }
+    return ok;
+  }
+
+  // ---------- Rechnungen ----------
+  const belegeOf = (rid) => D.fotos.filter((p) => p.rechnungId === rid).sort((a, b) => (a.datum || '').localeCompare(b.datum || ''));
+  const rechnungenOf = (igelId) => D.rechnungen.filter((r) => (r.igelIds || []).includes(igelId)).sort((a, b) => b.datum.localeCompare(a.datum));
+  const anteil = (r) => (r.betrag || 0) / Math.max(1, (r.igelIds || []).length);
+  const euro = (n) => `${fmtNum(n || 0, 2)} €`;
+  const istOffen = (r) => r.bezahlt === 'nein';
+  function rechnungIgelOptions(r) {
+    const linked = new Set(r ? r.igelIds || [] : []);
+    const cutoff = addDays(today(), -90);
+    return D.igel
+      .filter((i) => linked.has(i.id) || ACTIVE.has(i.status) || (i.abgangDatum || '') >= cutoff)
+      .sort((a, b) => (ACTIVE.has(b.status) - ACTIVE.has(a.status)) || byBox(a, b))
+      .map((i) => ({ v: i.id, l: igelName(i) + (i.box ? ` (Box ${i.box})` : '') + (ACTIVE.has(i.status) ? '' : ` · ${STATUS_L[i.status]}`) }));
+  }
+  function rechnungForm(r = null, preset = {}) {
+    const aussteller = [...new Set(D.rechnungen.map((x) => x.aussteller).concat(D.tierarzt.map((v) => v.praxis)).filter(Boolean))];
+    const vals = r || preset;
+    openForm({
+      title: r ? 'Rechnung bearbeiten' : 'Neue Rechnung',
+      groups: [
+        [{ key: 'datum', label: 'Rechnungsdatum', type: 'date', required: true, default: today() },
+         { key: 'aussteller', label: 'Aussteller (Praxis, Shop …)', list: aussteller },
+         { key: 'kategorie', label: 'Kategorie', type: 'select', options: opts(KATEGORIEN), default: 'tierarzt' },
+         { key: 'betrag', label: 'Betrag (€)', type: 'number', required: true, placeholder: 'z. B. 45,80' },
+         { key: 'nummer', label: 'Rechnungs-Nr.' }],
+        [{ key: 'igelIds', label: 'Für Igel (leer = allgemeine Kosten, mehrere = anteilig)', type: 'checks', options: rechnungIgelOptions(r) }],
+        [{ key: 'bezahlt', label: 'Bezahlt?', type: 'select', options: opts(BEZAHLT), default: 'ja' },
+         { key: 'erstattung', label: 'Erstattung (z. B. durch Verein)', type: 'select', options: opts(ERSTATTUNG), default: '' },
+         { key: 'notiz', label: 'Notiz', type: 'textarea' }],
+        [{ key: 'dateien', label: r ? `Weitere Belege hinzufügen (vorhanden: ${belegeOf(r.id).length})` : 'Beleg fotografieren / Foto oder PDF wählen', type: 'files' }]
+      ],
+      values: vals,
+      onSave: async (v) => {
+        if (!(v.betrag > 0)) { toast('Bitte einen Betrag angeben.'); return false; }
+        const files = v.dateien || []; delete v.dateien;
+        const obj = await save('rechnungen', { ...(r || {}), ...(preset.tierarztId && !r ? { tierarztId: preset.tierarztId } : {}), ...v, igelIds: v.igelIds || [] });
+        if (files.length) toast('Belege werden gespeichert …', 10000);
+        const n = await saveBelege(obj.id, files);
+        toast(`Rechnung gespeichert${n ? ` · ${n} ${n === 1 ? 'Beleg' : 'Belege'}` : ''}`);
+        if (!r) { closeSheet(); go({ name: 'rechnung', id: obj.id }); return 'handled'; }
+        return true;
+      },
+      onDelete: r ? async () => {
+        if (!confirm('Rechnung inkl. aller Belege löschen?')) return false;
+        await removeMany('fotos', belegeOf(r.id).map((p) => p.id)); await remove('rechnungen', r.id); return true;
+      } : null,
+      deleteLabel: 'Rechnung löschen'
+    });
+  }
+  function rechnungRow(r) {
+    const b = belegeOf(r.id); const img = b.find((p) => p.thumb);
+    const igel = (r.igelIds || []).map((id) => igelById(id)).filter(Boolean);
+    return `<button class="row" data-act="openRechnung" data-id="${r.id}">
+      ${img ? `<img class="thumb" src="${photoUrl(img)}" alt="">` : `<span class="thumb">${b.length ? '📄' : '🧾'}</span>`}
+      <span class="grow"><span class="t">${esc(r.aussteller || label(KATEGORIEN, r.kategorie))}</span> <span class="chip">${esc(label(KATEGORIEN, r.kategorie))}</span><br>
+      <span class="s">${fmtD(r.datum)}${igel.length ? ' · ' + igel.map((i) => esc(igelName(i))).join(', ') : ' · allgemein'}</span><br>
+      <span class="s">${istOffen(r) ? '<span class="down">● offen</span>' : '✓ bezahlt'}${r.erstattung ? ` · Erstattung ${esc(r.erstattung)}` : ''}${b.length ? ` · 📎 ${b.length}` : ' · <span class="down">kein Beleg</span>'}</span></span>
+      <span class="r"><strong>${euro(r.betrag)}</strong></span><span class="chev">›</span></button>`;
+  }
+  function rechnungYears() {
+    const ys = new Set(D.rechnungen.map((r) => r.datum.slice(0, 4))); ys.add(String(new Date().getFullYear()));
+    return [...ys].sort().reverse();
+  }
+  function rechnungenFiltered() {
+    const J = ui.reJahr; const q = (ui.reSearch || '').trim().toLowerCase();
+    return D.rechnungen.filter((r) => (J === 'alle' || r.datum.startsWith(J))
+      && (ui.reFilter === 'offen' ? istOffen(r) : ui.reFilter === 'erstattung' ? r.erstattung === 'beantragt' : ui.reFilter === 'ohneBeleg' ? !belegeOf(r.id).length : true)
+      && (!q || [r.aussteller, r.nummer, r.notiz, label(KATEGORIEN, r.kategorie), ...(r.igelIds || []).map((id) => igelName(igelById(id)))].some((v) => String(v || '').toLowerCase().includes(q))))
+      .sort((a, b) => b.datum.localeCompare(a.datum));
+  }
+  function viewRechnungen() {
+    setHeader('Rechnungen', { action: { label: '＋', aria: 'Rechnung erfassen', fn: () => rechnungForm() } });
+    const years = rechnungYears();
+    if (!ui.reJahr || (ui.reJahr !== 'alle' && !years.includes(ui.reJahr))) ui.reJahr = years[0];
+    if (!ui.reFilter) ui.reFilter = 'alle';
+    const J = ui.reJahr;
+    const imJahr = D.rechnungen.filter((r) => J === 'alle' || r.datum.startsWith(J));
+    const sum = (l) => l.reduce((s, r) => s + (r.betrag || 0), 0);
+    const proKat = KATEGORIEN.map(([k, l]) => [l, sum(imJahr.filter((r) => r.kategorie === k))]).filter(([, v]) => v > 0);
+    const list = rechnungenFiltered();
+    let html = `
+      <div class="seg seg-scroll">${[...years, 'alle'].map((y) => `<button data-act="reJahr" data-v="${y}" class="${J === y ? 'active' : ''}">${y === 'alle' ? 'Gesamt' : y}</button>`).join('')}</div>
+      <div class="card">
+        <div class="stats" style="margin-top:0">
+          <div class="stat"><div class="v">${euro(sum(imJahr))}</div><div class="l">Summe ${J === 'alle' ? 'gesamt' : J} (${imJahr.length})</div></div>
+          <div class="stat"><div class="v ${sum(imJahr.filter(istOffen)) ? 'down' : ''}">${euro(sum(imJahr.filter(istOffen)))}</div><div class="l">noch offen</div></div>
+          <div class="stat"><div class="v up">${euro(sum(imJahr.filter((r) => r.erstattung === 'erstattet')))}</div><div class="l">erstattet</div></div>
+        </div>
+        ${proKat.length ? `<dl class="kv" style="margin-top:12px">${proKat.map(([l, v]) => `<dt>${esc(l)}</dt><dd>${euro(v)}</dd>`).join('')}</dl>` : ''}
+      </div>
+      <div class="seg">${[['alle', 'Alle'], ['offen', 'Offen'], ['erstattung', 'Erstattung'], ['ohneBeleg', 'Ohne Beleg']].map(([v, l]) => `<button data-act="reFilter" data-v="${v}" class="${ui.reFilter === v ? 'active' : ''}">${l}</button>`).join('')}</div>
+      <div class="toolbar"><input class="search" id="reSearch" type="search" placeholder="Suchen (Aussteller, Nr., Igel, Notiz)" value="${esc(ui.reSearch || '')}" autocomplete="off"></div>`;
+    if (!D.rechnungen.length) return html + `<div class="empty"><div class="big">🧾</div><p>Noch keine Rechnungen erfasst.</p><button class="btn" data-act="newRechnung" style="max-width:260px">Erste Rechnung erfassen</button></div>`;
+    if (!list.length) return html + `<div class="empty">Keine Rechnungen für diese Auswahl.</div>`;
+    const groups = [];
+    for (const r of list) { const k = r.datum.slice(0, 7); let g = groups[groups.length - 1]; if (!g || g.k !== k) { g = { k, items: [] }; groups.push(g); } g.items.push(r); }
+    html += groups.map((g) => `<div class="day-head">${parseD(g.k + '-01').toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })} · ${euro(sum(g.items))}</div><div class="list">${g.items.map(rechnungRow).join('')}</div>`).join('');
+    html += `<button class="btn secondary" data-act="reCsv" style="margin-top:4px">📄 ${J === 'alle' ? 'Alle Rechnungen' : `Rechnungen ${J}`} als CSV (Excel/Numbers)</button>`;
+    return html;
+  }
+  function viewRechnung(r) {
+    setHeader(r.aussteller || 'Rechnung', { back: true, action: { label: 'Bearbeiten', fn: () => rechnungForm(r) } });
+    const b = belegeOf(r.id); const igel = (r.igelIds || []).map((id) => igelById(id)).filter(Boolean);
+    const vet = r.tierarztId ? D.tierarzt.find((v) => v.id === r.tierarztId) : null;
+    return `
+      <div class="card">
+        <div class="hero"><span class="avatar">🧾</span><div><h2>${euro(r.betrag)}</h2>
+          <span class="chip">${esc(label(KATEGORIEN, r.kategorie))}</span> ${istOffen(r) ? '<span class="chip aufnahme">offen</span>' : '<span class="chip ausgewildert">bezahlt</span>'}
+          ${r.erstattung ? `<span class="chip ${r.erstattung === 'erstattet' ? 'ausgewildert' : 'winterschlaf'}">Erstattung ${esc(r.erstattung)}</span>` : ''}
+          <div class="meta">${fmtD(r.datum)}</div></div></div>
+        <dl class="kv" style="margin-top:12px">
+          ${r.aussteller ? `<dt>Aussteller</dt><dd>${esc(r.aussteller)}</dd>` : ''}
+          ${r.nummer ? `<dt>Rechnungs-Nr.</dt><dd>${esc(r.nummer)}</dd>` : ''}
+          <dt>Igel</dt><dd>${igel.length ? igel.map((i) => `<button class="link" data-act="open" data-id="${i.id}">${esc(igelName(i))}</button>`).join(', ') + (igel.length > 1 ? `<br><span class="note">je ${euro(anteil(r))} anteilig</span>` : '') : 'allgemeine Kosten'}</dd>
+          ${vet ? `<dt>Tierarztbesuch</dt><dd>${fmtD(vet.datum)} · ${esc(vet.grund || '')}</dd>` : ''}
+          ${r.notiz ? `<dt>Notiz</dt><dd>${esc(r.notiz)}</dd>` : ''}
+        </dl>
+      </div>
+      <div class="btn-row" style="margin-bottom:12px">
+        ${istOffen(r) ? `<button class="btn" data-act="reBezahlt" data-id="${r.id}">✓ Als bezahlt markieren</button>` : ''}
+        ${r.erstattung === 'beantragt' ? `<button class="btn" data-act="reErstattet" data-id="${r.id}">✓ Erstattung erhalten</button>` : ''}
+      </div>
+      <div class="section-title">Belege (${b.length})</div>
+      <div class="gallery">
+        <button class="add" data-act="addBeleg" data-id="${r.id}">📷<br>Beleg hinzufügen</button>
+        ${b.map((p) => p.thumb ? `<img src="${photoUrl(p)}" alt="" data-act="beleg" data-id="${p.id}">` : `<button class="add pdf-tile" data-act="beleg" data-id="${p.id}">📄<br>${esc((p.name || 'PDF').slice(0, 18))}</button>`).join('')}
+      </div>`;
+  }
+  function pickBelege(rid) {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*,application/pdf'; inp.multiple = true;
+    inp.onchange = async () => {
+      const files = Array.from(inp.files || []); if (!files.length) return;
+      toast('Belege werden gespeichert …', 10000);
+      const n = await saveBelege(rid, files);
+      toast(`${n} ${n === 1 ? 'Beleg' : 'Belege'} gespeichert`); render();
+    };
+    inp.click();
+  }
+  function belegSheet(fotoId) {
+    const p = D.fotos.find((x) => x.id === fotoId); if (!p) return;
+    const isPdf = p.type === 'application/pdf';
+    openSheet({
+      title: isPdf ? (p.name || 'PDF-Beleg') : 'Beleg', cancelLabel: 'Schließen',
+      body: (isPdf ? `<div class="card" style="text-align:center"><div style="font-size:56px">📄</div><p>${esc(p.name || 'PDF-Beleg')}<br><span class="note">${fmtNum(p.full.byteLength / 1024)} KB</span></p></div>`
+        : `<img src="${photoUrl(p, true)}" alt="" style="width:100%;border-radius:14px;margin-bottom:12px">`) +
+        `<div class="btn-row">
+          <button class="btn secondary" data-sheet="belegShare" data-id="${p.id}">${isPdf ? 'Öffnen / Teilen' : 'Teilen / Sichern'}</button>
+          <button class="btn danger" data-sheet="belegDel" data-id="${p.id}">Löschen</button>
+        </div>`
+    });
+  }
+  function rechnungenCsv() {
+    const list = rechnungenFiltered(); if (!list.length) { toast('Keine Rechnungen in dieser Auswahl.'); return; }
+    const rows = [['Datum', 'Aussteller', 'Kategorie', 'Rechnungs-Nr.', 'Betrag (EUR)', 'Igel', 'Anteil je Igel (EUR)', 'Bezahlt', 'Erstattung', 'Belege', 'Notiz']];
+    for (const r of list.slice().reverse()) rows.push([fmtD(r.datum), r.aussteller, label(KATEGORIEN, r.kategorie), r.nummer, r.betrag,
+      (r.igelIds || []).map((id) => igelName(igelById(id))).join(', ') || 'allgemein', (r.igelIds || []).length > 1 ? anteil(r) : '',
+      istOffen(r) ? 'offen' : 'bezahlt', r.erstattung || '', belegeOf(r.id).length, r.notiz]);
+    rows.push(['', '', '', 'Summe', list.reduce((s, r) => s + (r.betrag || 0), 0)]);
+    const csv = '﻿' + rows.map((x) => x.map(csvCell).join(';')).join('\r\n');
+    readySheet('CSV bereit', new Blob([csv], { type: 'text/csv;charset=utf-8' }), `igelpflege-rechnungen-${ui.reJahr === 'alle' ? 'gesamt' : ui.reJahr}.csv`, `${list.length} Rechnungen · öffnet in Excel oder Numbers`);
   }
 
   // ---------- Teilen / Speichern ----------
@@ -1580,6 +1804,18 @@
     } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Tierarztbesuche.', M, y + 4); y += 10; }
 
     // Futter
+    // Kosten / Rechnungen
+    const res = rechnungenOf(i.id).slice().reverse();
+    if (res.length) {
+      section('Kosten / Rechnungen');
+      const sumA = res.reduce((x, r) => x + anteil(r), 0);
+      autoTable(doc, { ...tableBase, startY: y, head: [['Datum', 'Aussteller', 'Kategorie', 'Rechnungs-Nr.', 'Betrag', 'Anteil Igel', 'Status']],
+        body: res.map((r) => [fmtD(r.datum), r.aussteller || '', label(KATEGORIEN, r.kategorie), r.nummer || '', euro(r.betrag), (r.igelIds || []).length > 1 ? euro(anteil(r)) : euro(r.betrag),
+          [istOffen(r) ? 'offen' : 'bezahlt', r.erstattung ? `Erstattung ${r.erstattung}` : ''].filter(Boolean).join(', ')]),
+        foot: [['', '', '', '', 'Summe', euro(sumA), '']], footStyles: { fillColor: [230, 236, 224], textColor: 30, fontStyle: 'bold' } });
+      y = endY() + 7;
+    }
+
     const fs = byIgel('futter', i.id).sort((a, b) => a.datum.localeCompare(b.datum));
     section('Futterprotokoll');
     if (fs.length) {
@@ -1637,6 +1873,20 @@
     bulkFeed: () => bulkFeedSheet(),
     statistik: () => go({ name: 'statistik' }),
     medliste: () => go({ name: 'medliste' }),
+    newRechnung: () => rechnungForm(),
+    addRechnungIgel: (d) => rechnungForm(null, { igelIds: [d.id], kategorie: 'tierarzt' }),
+    rechnungAusVet: (d) => {
+      const v = D.tierarzt.find((x) => x.id === d.id); if (!v) return;
+      rechnungForm(null, { tierarztId: v.id, datum: v.datum, aussteller: v.praxis, kategorie: 'tierarzt', betrag: v.kosten, igelIds: [v.igelId], notiz: v.grund });
+    },
+    openRechnung: (d) => go({ name: 'rechnung', id: d.id }),
+    reJahr: (d) => { ui.reJahr = d.v; render(); },
+    reFilter: (d) => { ui.reFilter = d.v; render(); },
+    reCsv: () => rechnungenCsv(),
+    addBeleg: (d) => pickBelege(d.id),
+    beleg: (d) => belegSheet(d.id),
+    reBezahlt: async (d) => { const r = D.rechnungen.find((x) => x.id === d.id); if (!r) return; r.bezahlt = 'ja'; await save('rechnungen', r); toast('Als bezahlt markiert'); render(); },
+    reErstattet: async (d) => { const r = D.rechnungen.find((x) => x.id === d.id); if (!r) return; r.erstattung = 'erstattet'; await save('rechnungen', r); toast('Erstattung eingetragen'); render(); },
     finderliste: () => { ui.finderSearch = ''; go({ name: 'finderliste' }); },
     openFinder: (d) => go({ name: 'finder', key: d.key }),
     finderCsv: () => finderCsv(),
@@ -1670,6 +1920,13 @@
     },
     delete: async (el, sh) => { if (!sh._onDelete) return; const r = await sh._onDelete(); if (r === true) { closeSheet(); render(); toast('Gelöscht'); } },
     share: async (el, sh) => { if (sh._share) await sh._share(); },
+    belegShare: async (el) => {
+      const p = D.fotos.find((x) => x.id === el.dataset.id); if (!p) return;
+      const r = D.rechnungen.find((x) => x.id === p.rechnungId);
+      const base = `Beleg-${r ? r.datum : today()}${r && r.aussteller ? '-' + r.aussteller.replace(/[^\wäöüÄÖÜß-]+/g, '_') : ''}`;
+      await shareFile(new Blob([p.full], { type: p.type }), p.type === 'application/pdf' ? (p.name || base + '.pdf') : base + '.jpg');
+    },
+    belegDel: async (el) => { if (!confirm('Beleg löschen?')) return; await remove('fotos', el.dataset.id); closeSheet(); render(); toast('Beleg gelöscht'); },
     restoreMerge: async (el, sh) => { if (sh._backup) await applyBackup(sh._backup, 'merge'); },
     restoreReplace: async (el, sh) => {
       if (!sh._backup) return;
@@ -1687,9 +1944,9 @@
       e.preventDefault(); const fn = actions[el.dataset.act]; if (fn) fn(el.dataset, el);
     });
     $('#view').addEventListener('input', (e) => {
-      if (e.target.id === 'search' || e.target.id === 'finderSearch') {
+      if (['search', 'finderSearch', 'reSearch'].includes(e.target.id)) {
         const id = e.target.id;
-        if (id === 'search') ui.search = e.target.value; else ui.finderSearch = e.target.value;
+        if (id === 'search') ui.search = e.target.value; else if (id === 'reSearch') ui.reSearch = e.target.value; else ui.finderSearch = e.target.value;
         const pos = e.target.selectionStart;
         render(); const s = $('#' + id); if (s) { s.focus(); try { s.setSelectionRange(pos, pos); } catch (_) { /* */ } }
       }
