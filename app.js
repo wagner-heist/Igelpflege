@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
@@ -243,7 +243,9 @@
     render();
   }
   function back() {
-    const p = ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' };
+    const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
+    let p = parent ? { name: parent } : (ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' });
+    if (ui.route.name === 'finder' && ui.prev && ui.prev.name === 'detail') p = ui.prev; // vom Igel aus geöffnet → zurück zum Igel
     ui.prev = null; go(p, { keepPrev: true });
   }
   function setHeader(title, { back: showBack = false, action = null } = {}) {
@@ -268,6 +270,8 @@
     else if (r.name === 'heute') { setTab('heute'); view.innerHTML = viewHeute(); }
     else if (r.name === 'medliste') { setTab('einstellungen'); view.innerHTML = viewMedListe(); }
     else if (r.name === 'futterliste') { setTab('einstellungen'); view.innerHTML = viewFutterListe(); }
+    else if (r.name === 'finderliste') { setTab('einstellungen'); view.innerHTML = viewFinderListe(); }
+    else if (r.name === 'finder') { setTab('einstellungen'); view.innerHTML = viewFinder(r.key); }
     else if (r.name === 'statistik') { setTab('einstellungen'); view.innerHTML = viewStatistik(); }
     else if (r.name === 'einstellungen') { setTab('einstellungen'); view.innerHTML = viewSettings(); fillStorageInfo(); }
     updateBadge();
@@ -365,7 +369,8 @@
       </div>
       ${winterHtml}
       <div class="section-title">Daten</div>
-      <div class="card">${kv.length ? `<dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : '<span class="note">Keine weiteren Daten.</span>'}</div>
+      <div class="card">${kv.length ? `<dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === 'Kontakt Finder' ? kontaktLinks(String(v).split(/[,;]/).map((x) => x.trim()).filter(Boolean)) : esc(v)}</dd>`).join('')}</dl>` : '<span class="note">Keine weiteren Daten.</span>'}
+        ${i.finderName || i.finderKontakt ? `<p style="margin:10px 0 0"><button class="link" data-act="openFinder" data-key="${esc(finderKey(i))}">👤 Finder anzeigen${(() => { const n = finderList().find((f) => f.key === finderKey(i))?.igel.length || 0; return n > 1 ? ` (${n} Igel)` : ''; })()}</button></p>` : ''}</div>
       <div class="btn-row">
         <button class="btn secondary" data-act="pdf" data-id="${i.id}">📄 Pflegeprotokoll (PDF)</button>
         <button class="btn danger" data-act="delIgel" data-id="${i.id}">Igel löschen</button>
@@ -584,6 +589,94 @@
     });
   }
 
+  // ---------- Finderliste (wird automatisch aus den Igel-Daten gebildet) ----------
+  const finderKey = (i) => {
+    const n = String(i.finderName || '').trim().toLowerCase();
+    return n || '#' + String(i.finderKontakt || '').trim().toLowerCase();
+  };
+  function finderList() {
+    const map = new Map();
+    for (const i of D.igel) {
+      if (!String(i.finderName || '').trim() && !String(i.finderKontakt || '').trim()) continue;
+      const k = finderKey(i);
+      let f = map.get(k);
+      if (!f) { f = { key: k, name: String(i.finderName || '').trim(), kontakte: [], igel: [] }; map.set(k, f); }
+      for (const kt of String(i.finderKontakt || '').split(/[,;]/).map((x) => x.trim()).filter(Boolean)) if (!f.kontakte.includes(kt)) f.kontakte.push(kt);
+      f.igel.push(i);
+    }
+    const fd = (i) => i.fundDatum || i.aufnahmeDatum || '';
+    for (const f of map.values()) { f.igel.sort((a, b) => fd(b).localeCompare(fd(a))); f.letzter = fd(f.igel[0]); }
+    return [...map.values()].sort((a, b) => (a.name || '~').localeCompare(b.name || '~', 'de'));
+  }
+  function kontaktLinks(list) {
+    return list.map((k) => {
+      const e = esc(k);
+      if (k.includes('@')) return `<a href="mailto:${e}">${e}</a>`;
+      const tel = k.replace(/[^\d+]/g, '');
+      return tel.length >= 6 ? `<a href="tel:${esc(tel)}">${e}</a>` : e;
+    }).join('<br>');
+  }
+  function viewFinderListe() {
+    setHeader('Finderliste', { back: true });
+    const all = finderList(); const q = (ui.finderSearch || '').trim().toLowerCase();
+    const l = q ? all.filter((f) => [f.name, ...f.kontakte, ...f.igel.map((i) => igelName(i)), ...f.igel.map((i) => i.fundOrt)].some((v) => String(v || '').toLowerCase().includes(q))) : all;
+    let html = `<p class="note">Alle Finder aus den Igel-Daten. Neue Finder kommen automatisch dazu, sobald du beim Igel einen Finder einträgst.</p>
+      <div class="toolbar"><input class="search" id="finderSearch" type="search" placeholder="Suchen (Name, Telefon, Igel, Fundort)" value="${esc(ui.finderSearch || '')}" autocomplete="off"></div>`;
+    if (!all.length) return html + `<div class="empty"><div class="big">👤</div>Noch keine Finder erfasst.<br><span class="note">Trage beim Igel unter „Bearbeiten“ Name und Kontakt des Finders ein.</span></div>`;
+    if (!l.length) return html + `<div class="empty">Keine Treffer.</div>`;
+    html += `<div class="list">${l.map((f) => `<button class="row" data-act="openFinder" data-key="${esc(f.key)}">
+      <span class="grow"><span class="t">${esc(f.name || '(ohne Name)')}</span><br>
+      <span class="s">${esc(f.kontakte.join(' · ') || 'kein Kontakt')}</span><br>
+      <span class="s">${f.igel.length} ${f.igel.length === 1 ? 'Igel' : 'Igel'} · zuletzt ${fmtD(f.letzter)}</span></span>
+      <span class="r">${f.igel.length}</span><span class="chev">›</span></button>`).join('')}</div>
+      <button class="btn secondary" data-act="finderCsv">📄 Finderliste als CSV (Excel/Numbers)</button>`;
+    return html;
+  }
+  function viewFinder(key) {
+    const f = finderList().find((x) => x.key === key);
+    if (!f) { ui.route = { name: 'finderliste' }; return viewFinderListe(); }
+    setHeader(f.name || 'Finder', { back: true, action: { label: 'Bearbeiten', fn: () => finderForm(f) } });
+    return `
+      <div class="card"><dl class="kv">
+        <dt>Name</dt><dd>${esc(f.name || '–')}</dd>
+        <dt>Kontakt</dt><dd>${f.kontakte.length ? kontaktLinks(f.kontakte) : '–'}</dd>
+        <dt>Igel gebracht</dt><dd>${f.igel.length}</dd>
+        <dt>Zuletzt</dt><dd>${fmtD(f.letzter)}</dd>
+      </dl></div>
+      <div class="section-title">Gefundene Igel (${f.igel.length})</div>
+      <div class="list">${f.igel.map((i) => {
+        const p = titlePhoto(i);
+        return `<button class="row" data-act="open" data-id="${i.id}">
+          ${p ? `<img class="thumb" src="${photoUrl(p)}" alt="">` : '<span class="thumb">🦔</span>'}
+          <span class="grow"><span class="t">${esc(igelName(i))}</span> <span class="chip ${i.status}">${esc(STATUS_L[i.status] || '')}</span><br>
+          <span class="s">${[i.nummer ? `Nr. ${esc(i.nummer)}` : '', `gefunden ${fmtD(i.fundDatum || i.aufnahmeDatum)}`, i.fundOrt ? esc(i.fundOrt) : ''].filter(Boolean).join(' · ')}</span>
+          ${!ACTIVE.has(i.status) && (i.abgangDatum || i.abgangOrt) ? `<br><span class="s">${esc(STATUS_L[i.status])} ${fmtD(i.abgangDatum)}${i.abgangOrt ? ' · ' + esc(i.abgangOrt) : ''}</span>` : ''}</span>
+          <span class="chev">›</span></button>`;
+      }).join('')}</div>`;
+  }
+  // Änderungen am Finder werden in alle zugehörigen Igel übernommen
+  function finderForm(f) {
+    openForm({
+      title: 'Finder bearbeiten',
+      groups: [[{ key: 'name', label: 'Name' }, { key: 'kontakt', label: 'Kontakt (Telefon / E-Mail, mehrere mit Komma trennen)', type: 'tel' }]],
+      values: { name: f.name, kontakt: f.kontakte.join(', ') },
+      onSave: async (v) => {
+        if (!v.name && !v.kontakt) { toast('Bitte Name oder Kontakt angeben.'); return false; }
+        for (const i of f.igel) await save('igel', { ...i, finderName: v.name, finderKontakt: v.kontakt });
+        ui.route = { name: 'finder', key: finderKey({ finderName: v.name, finderKontakt: v.kontakt }) };
+        toast(`Bei ${f.igel.length} Igel aktualisiert`); return true;
+      }
+    });
+  }
+  function finderCsv() {
+    const l = finderList(); if (!l.length) { toast('Keine Finder vorhanden.'); return; }
+    const rows = [['Name', 'Kontakt', 'Anzahl Igel', 'Igel', 'Fundorte', 'Zuletzt']];
+    for (const f of l) rows.push([f.name, f.kontakte.join(', '), f.igel.length, f.igel.map((i) => (i.nummer ? `${i.nummer} ` : '') + igelName(i)).join(', '),
+      [...new Set(f.igel.map((i) => i.fundOrt).filter(Boolean))].join(', '), fmtD(f.letzter)]);
+    const csv = '﻿' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n');
+    readySheet('CSV bereit', new Blob([csv], { type: 'text/csv;charset=utf-8' }), `igelpflege-finder-${today()}.csv`, `${l.length} Finder · öffnet in Excel oder Numbers`);
+  }
+
   // ---------- Ansicht: Statistik ----------
   function statYears() {
     const ys = new Set(D.igel.map((i) => (i.aufnahmeDatum || '').slice(0, 4)).filter(Boolean));
@@ -667,6 +760,7 @@
       <div class="list">
         <button class="row" data-act="medliste"><span class="grow"><span class="t">💊 Medikamentenliste</span><br><span class="s">Vorlagen mit Dosis, Verabreichung, Dauer</span></span><span class="r">${S.medListe.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="futterliste"><span class="grow"><span class="t">🍽️ Futterliste</span><br><span class="s">Futtersorten mit Standardmenge</span></span><span class="r">${S.futterListe.length}</span><span class="chev">›</span></button>
+        <button class="row" data-act="finderliste"><span class="grow"><span class="t">👤 Finderliste</span><br><span class="s">Alle Finder mit Kontakt und ihren Igeln</span></span><span class="r">${finderList().length}</span><span class="chev">›</span></button>
       </div>
       <div class="section-title">Pflegestelle (erscheint im PDF)</div>
       <div class="form">
@@ -846,7 +940,8 @@
        { key: 'zustand', label: 'Zustand bei Aufnahme', type: 'textarea' }],
       [{ key: 'fundDatum', label: 'Fund am', type: 'date' }, { key: 'fundOrt', label: 'Fundort' },
        { key: 'fundUmstaende', label: 'Fundumstände', type: 'textarea' },
-       { key: 'finderName', label: 'Finder (Name)' }, { key: 'finderKontakt', label: 'Kontakt Finder', type: 'tel' }],
+       ...(finderList().length ? [{ key: 'vorlage', label: 'Bekannten Finder wählen', type: 'pick', pick: 'finder', options: finderList().map((f) => ({ v: f.key, l: (f.name || '(ohne Name)') + (f.kontakte[0] ? ` – ${f.kontakte[0]}` : '') })) }] : []),
+       { key: 'finderName', label: 'Finder (Name)' }, { key: 'finderKontakt', label: 'Kontakt Finder (Telefon / E-Mail)', type: 'tel' }],
       [{ key: 'winterschlafBeginn', label: 'Winterschlaf Beginn (wird bei Status „Winterschlaf“ automatisch gesetzt)', type: 'date' },
        { key: 'winterschlafEnde', label: 'Winterschlaf Ende / aufgewacht', type: 'date' }],
       [{ key: 'abgangDatum', label: 'Abgang am (Auswilderung / Weitergabe / Tod)', type: 'date' }, { key: 'abgangOrt', label: 'Verbleib / Auswilderungsort' },
@@ -859,7 +954,7 @@
         const doppelt = v.nummer && D.igel.find((x) => x.id !== i?.id && String(x.nummer || '').trim() === v.nummer);
         if (doppelt) { toast(`Pflege-Nr. ${v.nummer} ist schon an „${igelName(doppelt)}“ vergeben.`, 3500); return false; }
         const obj = { ...(i || {}), ...v };
-        delete obj.aufnahmeGewicht;
+        delete obj.aufnahmeGewicht; delete obj.vorlage;
         if (!ACTIVE.has(obj.status) && !obj.abgangDatum) obj.abgangDatum = today();
         const prevStatus = i ? i.status : null;
         if (obj.status === 'winterschlaf' && prevStatus !== 'winterschlaf' && !obj.winterschlafBeginn) obj.winterschlafBeginn = today();
@@ -921,6 +1016,10 @@
     if (kind === 'futter') {
       const f = S.futterListe.find((x) => x.id === id); if (!f) return;
       set('futter', f.name); if (f.menge != null) set('menge', f.menge);
+    }
+    if (kind === 'finder') {
+      const f = finderList().find((x) => x.key === id); if (!f) return;
+      set('finderName', f.name); set('finderKontakt', f.kontakte.join(', '));
     }
   }
   async function addToList(listKey, item) {
@@ -1404,6 +1503,9 @@
     bulkFeed: () => bulkFeedSheet(),
     statistik: () => go({ name: 'statistik' }),
     medliste: () => go({ name: 'medliste' }),
+    finderliste: () => { ui.finderSearch = ''; go({ name: 'finderliste' }); },
+    openFinder: (d) => go({ name: 'finder', key: d.key }),
+    finderCsv: () => finderCsv(),
     futterliste: () => go({ name: 'futterliste' }),
     addMedListe: () => medListeForm(),
     editMedListe: (d) => { const m = S.medListe.find((x) => x.id === d.id); if (m) medListeForm(m); },
@@ -1451,9 +1553,11 @@
       e.preventDefault(); const fn = actions[el.dataset.act]; if (fn) fn(el.dataset, el);
     });
     $('#view').addEventListener('input', (e) => {
-      if (e.target.id === 'search') {
-        ui.search = e.target.value; const pos = e.target.selectionStart;
-        render(); const s = $('#search'); if (s) { s.focus(); try { s.setSelectionRange(pos, pos); } catch (_) { /* */ } }
+      if (e.target.id === 'search' || e.target.id === 'finderSearch') {
+        const id = e.target.id;
+        if (id === 'search') ui.search = e.target.value; else ui.finderSearch = e.target.value;
+        const pos = e.target.selectionStart;
+        render(); const s = $('#' + id); if (s) { s.focus(); try { s.setSelectionRange(pos, pos); } catch (_) { /* */ } }
       }
     });
     $('#view').addEventListener('change', (e) => { if (e.target.id === 'restoreFile' && e.target.files[0]) { restoreBackup(e.target.files[0]); e.target.value = ''; } });
