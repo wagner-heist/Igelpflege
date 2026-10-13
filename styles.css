@@ -164,20 +164,16 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 
 /* Sheet (Formulare) */
 .sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 20; }
-/* Vollbild-Formular: Position und Höhe werden per JS an den sichtbaren Bereich (über der Tastatur) angepasst */
 .sheet {
-  position: fixed; left: 0; right: 0; top: 0; z-index: 21;
-  height: 100vh; height: 100dvh;
-  overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
-  background: var(--bg);
-  padding: 0 16px calc(24px + var(--safe-bottom));
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
+  max-height: 92vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  background: var(--bg); border-radius: 18px 18px 0 0;
+  padding: 0 16px calc(20px + var(--safe-bottom));
   max-width: 720px; margin: 0 auto;
-  animation: up .2s ease-out;
+  animation: up .22s ease-out;
 }
-@keyframes up { from { transform: translateY(30px); opacity: 0; } to { transform: none; opacity: 1; } }
-.sheet-head { position: sticky; top: 0; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: calc(var(--safe-top) + 10px) 0 10px; margin: 0 -16px 8px; padding-left: 16px; padding-right: 16px; background: var(--bg); border-bottom: 1px solid var(--line); z-index: 2; }
-.sheet .btn-save-bottom { margin-bottom: 12px; }
-body.sheet-open { position: fixed; left: 0; right: 0; overflow: hidden; }
+@keyframes up { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+.sheet-head { position: sticky; top: 0; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 14px 0 10px; background: var(--bg); z-index: 1; }
 .sheet-head h3 { grid-column: 2; margin: 0; font-size: 17px; }
 .sheet-head .cancel { grid-column: 1; justify-self: start; }
 .sheet-head .save { grid-column: 3; justify-self: end; }
