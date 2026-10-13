@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
@@ -602,10 +602,25 @@
   }
 
   // ---------- Formulare: Igel ----------
+  // Nächste freie Pflege-Nr.: letzte vergebene Nummer (zuletzt angelegter Igel) + 1.
+  // Präfix, Suffix und führende Nullen bleiben erhalten: "2026-14" → "2026-15", "007" → "008".
+  function nextNummer() {
+    const withNr = D.igel
+      .filter((x) => /\d/.test(String(x.nummer || '')))
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    if (!withNr.length) return '1';
+    const last = String(withNr[withNr.length - 1].nummer).trim();
+    const m = last.match(/^(.*?)(\d+)(\D*)$/);
+    if (!m) return '1';
+    const used = new Set(D.igel.map((x) => String(x.nummer || '').trim()));
+    let n = parseInt(m[2], 10); const width = m[2].length; let cand;
+    do { n++; cand = m[1] + String(n).padStart(width, '0') + m[3]; } while (used.has(cand));
+    return cand;
+  }
   function igelForm(i = null) {
     const isNew = !i;
     const groups = [
-      [{ key: 'name', label: 'Name / Rufname' }, { key: 'nummer', label: 'Pflege-Nr.' },
+      [{ key: 'name', label: 'Name / Rufname' }, { key: 'nummer', label: isNew ? 'Pflege-Nr. (automatisch, änderbar)' : 'Pflege-Nr.', default: isNew ? nextNummer() : '' },
        { key: 'status', label: 'Status', type: 'select', options: opts(STATUS), default: 'aufnahme' },
        { key: 'geschlecht', label: 'Geschlecht', type: 'select', options: opts(GESCHLECHT), default: 'unbekannt' },
        { key: 'alter', label: 'Alter', type: 'select', options: opts(ALTER), default: 'unbekannt' }],
@@ -622,6 +637,8 @@
       title: isNew ? 'Igel aufnehmen' : 'Igel bearbeiten', groups, values: i || {},
       onSave: async (v) => {
         if (!v.name && !v.nummer) { toast('Bitte Name oder Pflege-Nr. angeben.'); return false; }
+        const doppelt = v.nummer && D.igel.find((x) => x.id !== i?.id && String(x.nummer || '').trim() === v.nummer);
+        if (doppelt) { toast(`Pflege-Nr. ${v.nummer} ist schon an „${igelName(doppelt)}“ vergeben.`, 3500); return false; }
         const obj = { ...(i || {}), ...v };
         delete obj.aufnahmeGewicht;
         if (!ACTIVE.has(obj.status) && !obj.abgangDatum) obj.abgangDatum = today();

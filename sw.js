@@ -1,6 +1,6 @@
 // Service Worker: hält die App-Dateien offline vor. Es werden keine Nutzerdaten übertragen.
 // Bei jeder Änderung an den App-Dateien die Versionsnummer erhöhen.
-const CACHE = 'igelpflege-v2';
+const CACHE = 'igelpflege-v3';
 const ASSETS = [
   './',
   './index.html',
