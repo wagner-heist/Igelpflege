@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.0.2';
+  const VERSION = '1.1.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'settings'];
@@ -20,7 +20,7 @@
   const BEFALL = [['', '–'], ['gering', 'gering'], ['mittel', 'mittel'], ['stark', 'stark']];
   const GEFRESSEN = [['alles', 'alles'], ['fast', 'fast alles'], ['haelfte', 'etwa die Hälfte'], ['wenig', 'wenig'], ['nichts', 'nichts'], ['offen', 'nicht kontrolliert']];
   const FUTTER_VORSCHLAEGE = ['Katzenfutter (Nass)', 'Katzen-Trockenfutter', 'Igel-Trockenfutter', 'Rührei (ungewürzt)', 'Hähnchen gekocht', 'Insekten', 'Aufzuchtmilch'];
-  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, lastBackup: null };
+  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null };
 
   // ---------- Zustand ----------
   let db;
@@ -132,6 +132,39 @@
     if (span < 0.5) return null;
     return (last.gramm - ref.gramm) / span;
   }
+  // Gewichtsalarm: 2× in Folge abgenommen (mind. 1 %) oder Verlust ≥ X % gegenüber dem Höchstwert der letzten N Tage.
+  // Igel im Winterschlaf sind ausgenommen (Abnahme dort normal).
+  function weightAlarm(i) {
+    if (!i || !ACTIVE.has(i.status) || i.status === 'winterschlaf') return null;
+    const ws = weightsOf(i.id); if (ws.length < 2) return null;
+    const last = ws[ws.length - 1]; const reasons = [];
+    if (ws.length >= 3) {
+      const a = ws[ws.length - 3], b = ws[ws.length - 2];
+      if (b.gramm < a.gramm && last.gramm < b.gramm && (a.gramm - last.gramm) / a.gramm >= 0.01) reasons.push(`2× in Folge abgenommen (${signed(last.gramm - a.gramm)} g)`);
+    }
+    const tage = S.alarmTage || 3;
+    const cutoff = parseD(last.datum).getTime() - tage * 864e5;
+    const fenster = ws.filter((w) => w !== last && parseD(w.datum).getTime() >= cutoff);
+    if (fenster.length && S.alarmProzent) {
+      const max = Math.max(...fenster.map((w) => w.gramm)); const pct = (max - last.gramm) / max * 100;
+      if (pct >= S.alarmProzent) reasons.push(`−${fmtNum(pct, 1)} % in ${tage} Tagen (von ${fmtNum(max)} g)`);
+    }
+    return reasons.length ? { last, text: reasons.join(' · ') } : null;
+  }
+  // Winterschlaf: Gewicht bei Beginn (letzte Wiegung bis Beginn) und am Ende (erste Wiegung ab Ende) bzw. aktuell
+  function winterInfo(i) {
+    if (!i.winterschlafBeginn) return null;
+    const ws = weightsOf(i.id); const b = i.winterschlafBeginn; const e = i.winterschlafEnde || null;
+    const vor = ws.filter((w) => dayOf(w.datum) <= b);
+    const wB = vor.length ? vor[vor.length - 1] : (ws.find((w) => dayOf(w.datum) >= b) || null);
+    let wE;
+    if (e) { wE = ws.find((w) => dayOf(w.datum) >= e) || ws.filter((w) => dayOf(w.datum) <= e).pop() || null; }
+    else wE = ws.length ? ws[ws.length - 1] : null;
+    const verlust = wB && wE && wE !== wB ? wE.gramm - wB.gramm : null;
+    return { beginn: b, ende: e, tage: daysBetween(b, e || today()), wB, wE, verlust, pct: verlust != null ? verlust / wB.gramm * 100 : null };
+  }
+  const byBox = (a, b) => String(a.box || '~').localeCompare(String(b.box || '~'), 'de', { numeric: true }) || igelName(a).localeCompare(igelName(b), 'de');
+  const boxChip = (i) => (i.box ? ` <span class="chip">Box ${esc(i.box)}</span>` : '');
   const photosOf = (id) => byIgel('fotos', id).sort((a, b) => (a.datum || '').localeCompare(b.datum || ''));
   function titlePhoto(igel) {
     const ps = photosOf(igel.id); if (!ps.length) return null;
@@ -159,8 +192,9 @@
     const t = today();
     const soon = addDays(t, 3);
     const active = D.igel.filter((i) => ACTIVE.has(i.status));
-    const meds = [], wiegen = [], termine = [], kontrollen = [], futter = [];
+    const meds = [], wiegen = [], termine = [], kontrollen = [], futter = [], alarme = [];
     for (const i of active) {
+      const al = weightAlarm(i); if (al) alarme.push({ igel: i, ...al });
       for (const m of byIgel('medikation', i.id)) {
         if (!medActiveOn(m, t)) continue;
         const done = gabenOn(m.id, t).length;
@@ -186,8 +220,9 @@
       if (i.status !== 'winterschlaf' && !byIgel('futter', i.id).some((f) => dayOf(f.datum) === t)) futter.push({ igel: i });
     }
     const offeneMeds = meds.filter((x) => x.done < x.soll).length;
-    const count = offeneMeds + wiegen.length + termine.filter((x) => x.over || x.heute).length + kontrollen.filter((x) => x.over || x.heute).length;
-    return { meds, wiegen, termine, kontrollen, futter, count };
+    const count = alarme.length + offeneMeds + wiegen.length +termine.filter((x) => x.over || x.heute).length + kontrollen.filter((x) => x.over || x.heute).length;
+    [meds, wiegen, termine, kontrollen, futter, alarme].forEach((l) => l.sort((a, b) => byBox(a.igel, b.igel)));
+    return { meds, wiegen, termine, kontrollen, futter, alarme, count };
   }
   function updateBadge() {
     const n = dueItems().count; const b = $('#badgeHeute');
@@ -226,6 +261,7 @@
       view.innerHTML = viewDetail(i);
     }
     else if (r.name === 'heute') { setTab('heute'); view.innerHTML = viewHeute(); }
+    else if (r.name === 'statistik') { setTab('einstellungen'); view.innerHTML = viewStatistik(); }
     else if (r.name === 'einstellungen') { setTab('einstellungen'); view.innerHTML = viewSettings(); fillStorageInfo(); }
     updateBadge();
   }
@@ -235,21 +271,23 @@
     setHeader('Igel', { action: { label: '＋', aria: 'Igel aufnehmen', fn: () => igelForm() } });
     const q = ui.search.trim().toLowerCase();
     let list = D.igel.filter((i) => ui.filter === 'alle' || (ui.filter === 'aktiv' ? ACTIVE.has(i.status) : !ACTIVE.has(i.status)));
-    if (q) list = list.filter((i) => [i.name, i.nummer, i.fundOrt, i.finderName].some((v) => String(v || '').toLowerCase().includes(q)));
+    if (q) list = list.filter((i) => [i.name, i.nummer, i.box, i.fundOrt, i.finderName].some((v) => String(v || '').toLowerCase().includes(q)));
     list.sort((a, b) => (b.aufnahmeDatum || '').localeCompare(a.aufnahmeDatum || '') || igelName(a).localeCompare(igelName(b)));
     const cntA = D.igel.filter((i) => ACTIVE.has(i.status)).length;
     let html = `
       <div class="seg">
         ${[['aktiv', `In Pflege (${cntA})`], ['abgeschlossen', 'Abgeschlossen'], ['alle', 'Alle']].map(([v, l]) => `<button data-act="filter" data-v="${v}" class="${ui.filter === v ? 'active' : ''}">${l}</button>`).join('')}
       </div>
-      <div class="toolbar"><input class="search" id="search" type="search" placeholder="Suchen (Name, Nr., Fundort, Finder)" value="${esc(ui.search)}" autocomplete="off"></div>`;
+      <div class="toolbar"><input class="search" id="search" type="search" placeholder="Suchen (Name, Nr., Box, Fundort, Finder)" value="${esc(ui.search)}" autocomplete="off"></div>
+      ${cntA ? `<div class="btn-row" style="margin-bottom:12px"><button class="btn small secondary" data-act="bulkWeigh">⚖️ Alle wiegen</button><button class="btn small secondary" data-act="bulkFeed">🍽️ Alle füttern</button></div>` : ''}`;
     if (!D.igel.length) {
       return html + `<div class="empty"><div class="big">🦔</div><p>Noch keine Igel erfasst.</p><button class="btn" data-act="newIgel" style="max-width:260px">Ersten Igel aufnehmen</button></div>`;
     }
     if (!list.length) return html + `<div class="empty">Keine Treffer.</div>`;
     html += `<div class="list">` + list.map((i) => {
       const p = titlePhoto(i); const lw = lastWeight(i.id); const tr = trend(i.id);
-      const sub = [i.nummer ? `Nr. ${esc(i.nummer)}` : '', lw ? `${fmtNum(lw.gramm)} g` : 'kein Gewicht', tr != null ? `<span class="${tr >= 0 ? 'up' : 'down'}">${signed(tr, 1)} g/Tag</span>` : ''].filter(Boolean).join(' · ');
+      const al = weightAlarm(i);
+      const sub = [al ? '<span class="down">⚠️ Gewichtsalarm</span>' : '', i.nummer ? `Nr. ${esc(i.nummer)}` : '', i.box ? `Box ${esc(i.box)}` : '', lw ? `${fmtNum(lw.gramm)} g` : 'kein Gewicht', tr != null ? `<span class="${tr >= 0 ? 'up' : 'down'}">${signed(tr, 1)} g/Tag</span>` : ''].filter(Boolean).join(' · ');
       const tage = inCareDays(i);
       return `<button class="row" data-act="open" data-id="${i.id}">
         ${p ? `<img class="thumb" src="${photoUrl(p)}" alt="">` : `<span class="thumb">🦔</span>`}
@@ -285,19 +323,31 @@
   function detailUebersicht(i) {
     const p = titlePhoto(i); const ps = photosOf(i.id);
     const tage = inCareDays(i);
+    const al = weightAlarm(i); const wi = winterInfo(i);
     const kv = [
-      ['Pflege-Nr.', i.nummer], ['Geschlecht', label(GESCHLECHT, i.geschlecht)], ['Alter', label(ALTER, i.alter)],
+      ['Pflege-Nr.', i.nummer], ['Box / Gehege', i.box], ['Geschlecht', label(GESCHLECHT, i.geschlecht)], ['Alter', label(ALTER, i.alter)],
       ['Aufnahme', fmtD(i.aufnahmeDatum)], ['Fund am', fmtD(i.fundDatum)], ['Fundort', i.fundOrt], ['Fundumstände', i.fundUmstaende],
       ['Finder', i.finderName], ['Kontakt Finder', i.finderKontakt], ['Zustand bei Aufnahme', i.zustand],
       ['Abgang am', fmtD(i.abgangDatum)], ['Verbleib / Ort', i.abgangOrt], ['Notizen', i.notizen]
     ].filter(([, v]) => v && v !== 'unbekannt' || false);
+    const winterHtml = wi ? `
+      <div class="section-title">Winterschlaf</div>
+      <div class="card"><dl class="kv">
+        <dt>Beginn</dt><dd>${fmtD(wi.beginn)}</dd>
+        <dt>Ende</dt><dd>${wi.ende ? fmtD(wi.ende) : `läuft (${wi.tage} ${wi.tage === 1 ? 'Tag' : 'Tage'})`}</dd>
+        ${wi.ende ? `<dt>Dauer</dt><dd>${wi.tage} Tage</dd>` : ''}
+        <dt>Gewicht Beginn</dt><dd>${wi.wB ? `${fmtNum(wi.wB.gramm)} g (${fmtD(wi.wB.datum)})` : '–'}</dd>
+        <dt>${wi.ende ? 'Gewicht Ende' : 'Gewicht aktuell'}</dt><dd>${wi.wE ? `${fmtNum(wi.wE.gramm)} g (${fmtD(wi.wE.datum)})` : '–'}</dd>
+        <dt>Veränderung</dt><dd class="${wi.verlust < 0 ? 'down' : wi.verlust > 0 ? 'up' : ''}">${wi.verlust != null ? `${signed(wi.verlust)} g (${signed(wi.pct, 1)} %)` : '–'}</dd>
+      </dl></div>` : '';
     return `
+      ${al ? `<div class="hint alarm">⚠️ <strong>Gewichtsalarm:</strong> ${esc(al.text)}</div>` : ''}
       <div class="card">
         <div class="hero">
           ${p ? `<img class="avatar" src="${photoUrl(p)}" alt="" data-act="photo" data-id="${p.id}">` : `<span class="avatar">🦔</span>`}
           <div><h2>${esc(igelName(i))}</h2>
             <span class="chip ${i.status}">${esc(STATUS_L[i.status])}</span>
-            <div class="meta">${tage != null ? `${tage} ${tage === 1 ? 'Tag' : 'Tage'} in Pflege` : ''}</div></div>
+            <div class="meta">${[i.box ? `Box ${esc(i.box)}` : '', tage != null ? `${tage} ${tage === 1 ? 'Tag' : 'Tage'} in Pflege` : ''].filter(Boolean).join(' · ')}</div></div>
         </div>
         ${statsHtml(i)}
       </div>
@@ -306,6 +356,7 @@
         <button class="add" data-act="addPhoto" data-id="${i.id}">📷<br>Foto hinzufügen</button>
         ${ps.slice().reverse().map((f) => `<img src="${photoUrl(f)}" alt="" data-act="photo" data-id="${f.id}">`).join('')}
       </div>
+      ${winterHtml}
       <div class="section-title">Daten</div>
       <div class="card">${kv.length ? `<dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : '<span class="note">Keine weiteren Daten.</span>'}</div>
       <div class="btn-row">
@@ -322,7 +373,9 @@
       return `<button class="row" data-act="editWeight" data-id="${w.id}">
         <span class="grow"><span class="t">${fmtNum(w.gramm)} g</span>${d != null ? ` <span class="${d >= 0 ? 'up' : 'down'}">${signed(d)} g</span>` : ''}<br><span class="s">${fmtDT(w.datum)}${w.notiz ? ' · ' + esc(w.notiz) : ''}</span></span><span class="chev">›</span></button>`;
     }).join('');
+    const al = weightAlarm(i);
     return `
+      ${al ? `<div class="hint alarm">⚠️ <strong>Gewichtsalarm:</strong> ${esc(al.text)}</div>` : ''}
       <div class="card">${statsHtml(i)}<div style="margin-top:12px">${chartSvg(ws)}</div></div>
       <button class="btn" data-act="addWeight" data-id="${i.id}">⚖️ Wiegen</button>
       <div class="section-title">Wiegeprotokoll (${ws.length})</div>
@@ -422,11 +475,19 @@
     const backupAlt = !S.lastBackup || daysBetween(S.lastBackup, t) >= 7;
     if (D.igel.length && backupAlt) html += `<div class="hint">💾 ${S.lastBackup ? `Letztes Backup vor ${daysBetween(S.lastBackup, t)} Tagen.` : 'Noch kein Backup erstellt.'} <button class="link" data-act="backup">Jetzt sichern</button></div>`;
 
-    const igelLink = (i) => `<button class="link" data-act="open" data-id="${i.id}">${esc(igelName(i))}</button>`;
+    const igelLink = (i) => `<button class="link" data-act="open" data-id="${i.id}">${esc(igelName(i))}</button>${boxChip(i)}`;
+    const anyActive = D.igel.some((i) => ACTIVE.has(i.status));
+    const anyFeed = D.igel.some((i) => ACTIVE.has(i.status) && i.status !== 'winterschlaf');
+
+    if (d.alarme.length) {
+      html += `<div class="section-title">⚠️ Gewichtsalarm</div><div class="list">${d.alarme.map(({ igel, last, text }) => `
+        <div class="row due over"><span class="grow">${igelLink(igel)}<br><span class="s down">${esc(text)}</span><br>
+        <span class="s">aktuell ${fmtNum(last.gramm)} g · ${fmtDT(last.datum)}</span></span></div>`).join('')}</div>`;
+    }
 
     html += `<div class="section-title">Medikamente</div>`;
     if (d.meds.length) {
-      d.meds.sort((a, b) => (a.done >= a.soll) - (b.done >= b.soll) || igelName(a.igel).localeCompare(igelName(b.igel)));
+      d.meds.sort((a, b) => (a.done >= a.soll) - (b.done >= b.soll) || byBox(a.igel, b.igel));
       html += `<div class="list">${d.meds.map(({ igel, med, done, soll }) => `
         <div class="row ${done < soll ? 'due' : ''}">
           <span class="grow">${igelLink(igel)}<br><span class="t">${esc(med.mittel)}</span> <span class="s">${esc(med.dosis)} · ${esc(label(APPLIKATION, med.applikation))}</span>
@@ -436,7 +497,7 @@
         </div>`).join('')}</div>`;
     } else html += `<div class="card note">Heute keine Medikamente fällig.</div>`;
 
-    html += `<div class="section-title">Wiegen fällig</div>`;
+    html += `<div class="section-title">Wiegen fällig ${anyActive ? '<button class="link" data-act="bulkWeigh">⚖️ Alle wiegen</button>' : ''}</div>`;
     if (d.wiegen.length) {
       html += `<div class="list">${d.wiegen.map(({ igel, seit, lw }) => `
         <div class="row due"><span class="grow">${igelLink(igel)}<br><span class="s">${lw ? `zuletzt ${fmtNum(lw.gramm)} g, vor ${seit} ${seit === 1 ? 'Tag' : 'Tagen'}` : 'noch nie gewogen'}</span></span>
@@ -450,11 +511,84 @@
       html += `</div>`;
     }
 
-    html += `<div class="section-title">Fütterung heute noch nicht eingetragen</div>`;
+    html += `<div class="section-title">Fütterung heute offen ${anyFeed ? '<button class="link" data-act="bulkFeed">🍽️ Alle füttern</button>' : ''}</div>`;
     if (d.futter.length) {
       html += `<div class="list">${d.futter.map(({ igel }) => `<div class="row"><span class="grow">${igelLink(igel)}</span><button class="btn small secondary" data-act="addFutter" data-id="${igel.id}">🍽️ Eintragen</button></div>`).join('')}</div>`;
     } else html += `<div class="card note">${D.igel.some((i) => ACTIVE.has(i.status)) ? 'Für alle Igel ist heute eine Fütterung eingetragen.' : 'Zurzeit keine Igel in Pflege.'}</div>`;
     return html;
+  }
+
+  // ---------- Ansicht: Statistik ----------
+  function statYears() {
+    const ys = new Set(D.igel.map((i) => (i.aufnahmeDatum || '').slice(0, 4)).filter(Boolean));
+    D.tierarzt.forEach((v) => v.datum && ys.add(v.datum.slice(0, 4)));
+    ys.add(String(new Date().getFullYear()));
+    return [...ys].sort().reverse();
+  }
+  function statData(J) {
+    const inJ = (s) => J === 'alle' || String(s || '').startsWith(J);
+    const igel = D.igel.filter((i) => inJ(i.aufnahmeDatum));
+    const cnt = (s) => igel.filter((i) => i.status === s).length;
+    const aus = cnt('ausgewildert'), weiter = cnt('weitergegeben'), tot = cnt('verstorben');
+    const abg = aus + weiter + tot;
+    const dauern = igel.filter((i) => !ACTIVE.has(i.status) && i.abgangDatum).map(inCareDays).filter((x) => x != null);
+    const aufnG = igel.map((i) => firstWeight(i.id)).filter(Boolean).map((w) => w.gramm);
+    const visits = D.tierarzt.filter((v) => inJ(v.datum));
+    const avg = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
+    const monate = Array(12).fill(0); igel.forEach((i) => { const m = parseD(i.aufnahmeDatum); if (m) monate[m.getMonth()]++; });
+    return {
+      igel, aufnahmen: igel.length, aktiv: igel.filter((i) => ACTIVE.has(i.status)).length, winter: cnt('winterschlaf'),
+      aus, weiter, tot, abg, quoteAus: abg ? aus / abg * 100 : null, quoteTot: abg ? tot / abg * 100 : null,
+      dauer: avg(dauern), aufnG: avg(aufnG),
+      m: igel.filter((i) => i.geschlecht === 'm').length, w: igel.filter((i) => i.geschlecht === 'w').length,
+      besuche: visits.length, kosten: visits.reduce((s, v) => s + (v.kosten || 0), 0), monate
+    };
+  }
+  function viewStatistik() {
+    setHeader('Statistik', { back: true });
+    const years = statYears();
+    if (!ui.statJahr || (ui.statJahr !== 'alle' && !years.includes(ui.statJahr))) ui.statJahr = years[0];
+    const J = ui.statJahr; const s = statData(J);
+    const tile = (v, l, cls = '') => `<div class="stat"><div class="v ${cls}">${v}</div><div class="l">${l}</div></div>`;
+    const mn = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+    const mx = Math.max(1, ...s.monate);
+    const bars = `<svg class="chart" viewBox="0 0 340 130" role="img" aria-label="Aufnahmen pro Monat">${s.monate.map((n, k) => {
+      const h = n / mx * 90; const x = 8 + k * 27.5;
+      return `<rect x="${x}" y="${104 - h}" width="20" height="${h}" rx="3" class="bar"/>${n ? `<text x="${x + 10}" y="${100 - h}" text-anchor="middle">${n}</text>` : ''}<text x="${x + 10}" y="122" text-anchor="middle">${mn[k]}</text>`;
+    }).join('')}</svg>`;
+    return `
+      <div class="seg seg-scroll">${[...years, 'alle'].map((y) => `<button data-act="statJahr" data-v="${y}" class="${J === y ? 'active' : ''}">${y === 'alle' ? 'Gesamt' : y}</button>`).join('')}</div>
+      <div class="section-title">Aufnahmen ${J === 'alle' ? 'gesamt' : J}</div>
+      <div class="card"><div class="stats" style="margin-top:0">
+        ${tile(s.aufnahmen, 'Aufnahmen')}${tile(s.aktiv, 'noch in Pflege')}${tile(s.winter, 'im Winterschlaf')}
+        ${tile(s.aus, 'ausgewildert', 'up')}${tile(s.weiter, 'weitergegeben')}${tile(s.tot, 'verstorben', s.tot ? 'down' : '')}
+        ${tile(s.quoteAus != null ? fmtNum(s.quoteAus) + ' %' : '–', 'ausgewildert*')}${tile(s.dauer != null ? fmtNum(s.dauer) + ' T' : '–', 'Ø Pflegedauer*')}${tile(s.aufnG != null ? fmtNum(s.aufnG) + ' g' : '–', 'Ø Aufnahmegewicht')}
+        ${tile(s.w, 'weiblich')}${tile(s.m, 'männlich')}${tile(s.aufnahmen - s.w - s.m, 'unbekannt')}
+      </div><p class="note" style="margin-bottom:0">* bezogen auf abgeschlossene Fälle (${s.abg})</p></div>
+      ${J !== 'alle' || s.aufnahmen ? `<div class="section-title">Aufnahmen pro Monat</div><div class="card">${bars}</div>` : ''}
+      <div class="section-title">Tierarzt ${J === 'alle' ? 'gesamt' : J}</div>
+      <div class="card"><div class="stats" style="margin-top:0">
+        ${tile(s.besuche, 'Besuche')}${tile(fmtNum(s.kosten, 2) + ' €', 'Kosten')}${tile(s.besuche ? fmtNum(s.kosten / s.besuche, 2) + ' €' : '–', 'Ø pro Besuch')}
+      </div></div>
+      <button class="btn secondary" data-act="csv">📄 Igel-Liste ${J === 'alle' ? 'gesamt' : J} als CSV (Excel/Numbers)</button>`;
+  }
+  function csvCell(v) {
+    let s = typeof v === 'number' ? String(Math.round(v * 100) / 100).replace('.', ',') : String(v ?? '');
+    s = s.replace(/−/g, '-');
+    return /[;"\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+  function csvExport(J) {
+    const s = statData(J);
+    if (!s.igel.length) { toast('Keine Igel in diesem Zeitraum.'); return; }
+    const rows = [['Pflege-Nr.', 'Name', 'Box', 'Status', 'Geschlecht', 'Alter', 'Aufnahme', 'Abgang', 'Tage in Pflege', 'Gewicht Aufnahme (g)', 'Gewicht zuletzt (g)', 'Winterschlaf von', 'Winterschlaf bis', 'Fundort', 'Finder', 'Kontakt Finder', 'Verbleib', 'Tierarztbesuche', 'Tierarztkosten (EUR)']];
+    s.igel.slice().sort((a, b) => (a.aufnahmeDatum || '').localeCompare(b.aufnahmeDatum || '')).forEach((i) => {
+      const fw = firstWeight(i.id), lw = lastWeight(i.id); const v = byIgel('tierarzt', i.id);
+      rows.push([i.nummer, i.name, i.box, STATUS_L[i.status], label(GESCHLECHT, i.geschlecht), label(ALTER, i.alter), fmtD(i.aufnahmeDatum), fmtD(i.abgangDatum),
+        inCareDays(i) ?? '', fw ? fw.gramm : '', lw ? lw.gramm : '', fmtD(i.winterschlafBeginn), fmtD(i.winterschlafEnde),
+        i.fundOrt, i.finderName, i.finderKontakt, i.abgangOrt, v.length, v.reduce((x, y) => x + (y.kosten || 0), 0)]);
+    });
+    const csv = '﻿' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n');
+    readySheet('CSV bereit', new Blob([csv], { type: 'text/csv;charset=utf-8' }), `igelpflege-${J === 'alle' ? 'gesamt' : J}.csv`, `${s.igel.length} Igel · Semikolon-getrennt, öffnet direkt in Excel oder Numbers`);
   }
 
   // ---------- Ansicht: Einstellungen ----------
@@ -462,6 +596,7 @@
     setHeader('Einstellungen');
     const counts = DATA_STORES.reduce((a, s) => ((a[s] = D[s].length), a), {});
     return `
+      <button class="btn secondary" data-act="statistik" style="margin-top:4px">📊 Jahresstatistik</button>
       <div class="section-title">Pflegestelle (erscheint im PDF)</div>
       <div class="form">
         <label class="field"><span>Name der Pflegestelle</span><input id="s_pflegestelle" value="${esc(S.pflegestelle)}"></label>
@@ -474,6 +609,12 @@
         <label class="field"><span>Wiegen fällig nach … Tagen</span><input id="s_wiegenTage" inputmode="numeric" value="${esc(S.wiegenTage)}"></label>
         <label class="field"><span>Im Winterschlaf: Wiegen fällig nach … Tagen</span><input id="s_wiegenTageWinter" inputmode="numeric" value="${esc(S.wiegenTageWinter)}"></label>
       </div>
+      <div class="section-title">Gewichtsalarm</div>
+      <div class="form">
+        <label class="field"><span>Alarm ab Gewichtsverlust von … % (leer = aus)</span><input id="s_alarmProzent" inputmode="decimal" value="${esc(S.alarmProzent ?? '')}"></label>
+        <label class="field"><span>… innerhalb von … Tagen</span><input id="s_alarmTage" inputmode="numeric" value="${esc(S.alarmTage)}"></label>
+      </div>
+      <p class="note">Zusätzlich gibt es immer Alarm, wenn ein Igel 2× in Folge abnimmt. Igel im Winterschlaf sind ausgenommen.</p>
       <button class="btn" data-act="saveSettings">Einstellungen speichern</button>
 
       <div class="section-title">Datensicherung</div>
@@ -521,7 +662,7 @@
   function closeSheet() {
     const sh = $('#sheet');
     if (document.activeElement && sh.contains(document.activeElement)) document.activeElement.blur();
-    sh.hidden = true; sh.innerHTML = ''; sh._onSave = null; sh._onDelete = null; sh._share = null;
+    sh.hidden = true; sh.innerHTML = ''; sh._onSave = null; sh._onDelete = null; sh._share = null; sh._backup = null;
     sh.style.top = ''; sh.style.height = '';
     $('#sheetBackdrop').hidden = true;
     unlockBody();
@@ -566,7 +707,10 @@
       case 'select': input = `<select id="${id}">${f.options.map((o) => `<option value="${esc(o.v)}"${String(o.v) === String(val) ? ' selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`; break;
       case 'checks': {
         const arr = Array.isArray(val) ? val : [];
-        input = `<div class="checks" id="${id}">${f.options.map((o) => `<label><input type="checkbox" value="${esc(o)}"${arr.includes(o) ? ' checked' : ''}>${esc(o)}</label>`).join('')}</div>`; break;
+        input = `<div class="checks" id="${id}">${f.options.map((o) => {
+          const ov = typeof o === 'object' ? o.v : o; const ol = typeof o === 'object' ? o.l : o;
+          return `<label><input type="checkbox" value="${esc(ov)}"${arr.includes(ov) ? ' checked' : ''}>${esc(ol)}</label>`;
+        }).join('')}</div>`; break;
       }
       case 'number': input = `<input id="${id}" type="text" inputmode="decimal" value="${esc(val === '' || val == null ? '' : String(val).replace('.', ','))}" placeholder="${esc(f.placeholder || '')}">`; break;
       case 'date': input = `<input id="${id}" type="date" value="${esc(val)}">`; break;
@@ -621,6 +765,7 @@
     const isNew = !i;
     const groups = [
       [{ key: 'name', label: 'Name / Rufname' }, { key: 'nummer', label: isNew ? 'Pflege-Nr. (automatisch, änderbar)' : 'Pflege-Nr.', default: isNew ? nextNummer() : '' },
+       { key: 'box', label: 'Box / Gehege' },
        { key: 'status', label: 'Status', type: 'select', options: opts(STATUS), default: 'aufnahme' },
        { key: 'geschlecht', label: 'Geschlecht', type: 'select', options: opts(GESCHLECHT), default: 'unbekannt' },
        { key: 'alter', label: 'Alter', type: 'select', options: opts(ALTER), default: 'unbekannt' }],
@@ -630,6 +775,8 @@
       [{ key: 'fundDatum', label: 'Fund am', type: 'date' }, { key: 'fundOrt', label: 'Fundort' },
        { key: 'fundUmstaende', label: 'Fundumstände', type: 'textarea' },
        { key: 'finderName', label: 'Finder (Name)' }, { key: 'finderKontakt', label: 'Kontakt Finder', type: 'tel' }],
+      [{ key: 'winterschlafBeginn', label: 'Winterschlaf Beginn (wird bei Status „Winterschlaf“ automatisch gesetzt)', type: 'date' },
+       { key: 'winterschlafEnde', label: 'Winterschlaf Ende / aufgewacht', type: 'date' }],
       [{ key: 'abgangDatum', label: 'Abgang am (Auswilderung / Weitergabe / Tod)', type: 'date' }, { key: 'abgangOrt', label: 'Verbleib / Auswilderungsort' },
        { key: 'notizen', label: 'Notizen', type: 'textarea' }]
     ];
@@ -642,6 +789,10 @@
         const obj = { ...(i || {}), ...v };
         delete obj.aufnahmeGewicht;
         if (!ACTIVE.has(obj.status) && !obj.abgangDatum) obj.abgangDatum = today();
+        const prevStatus = i ? i.status : null;
+        if (obj.status === 'winterschlaf' && prevStatus !== 'winterschlaf' && !obj.winterschlafBeginn) obj.winterschlafBeginn = today();
+        if (prevStatus === 'winterschlaf' && obj.status !== 'winterschlaf' && obj.winterschlafBeginn && !obj.winterschlafEnde) obj.winterschlafEnde = today();
+        if (obj.winterschlafBeginn && obj.winterschlafEnde && obj.winterschlafEnde < obj.winterschlafBeginn) { toast('Winterschlaf-Ende liegt vor dem Beginn.'); return false; }
         await save('igel', obj);
         if (isNew && v.aufnahmeGewicht) await save('gewichte', { igelId: obj.id, datum: `${v.aufnahmeDatum}T${nowDT().slice(11)}`, gramm: v.aufnahmeGewicht, notiz: 'Aufnahme' });
         toast(isNew ? 'Igel aufgenommen' : 'Gespeichert');
@@ -758,6 +909,65 @@
     });
   }
 
+  // ---------- Schnellerfassung: Alle wiegen ----------
+  function bulkWeighSheet() {
+    const list = D.igel.filter((i) => ACTIVE.has(i.status)).sort(byBox);
+    if (!list.length) { toast('Keine Igel in Pflege.'); return; }
+    const t = today();
+    const body = `
+      <div class="form"><label class="field"><span>Zeitpunkt (für alle)</span><input id="bw_datum" type="datetime-local" value="${nowDT()}"></label></div>
+      <p class="note">Gewicht eintippen – „Weiter“ springt zum nächsten Igel. Leere Felder werden übersprungen.</p>
+      <div class="form">${list.map((i, k) => {
+        const lw = lastWeight(i.id); const heute = lw && dayOf(lw.datum) === t;
+        return `<label class="field"><span>${esc(igelName(i))}${i.box ? ` · Box ${esc(i.box)}` : ''}${i.status === 'winterschlaf' ? ' · 💤' : ''}${lw ? ` · zuletzt ${fmtNum(lw.gramm)} g (${heute ? 'heute' : fmtShort(lw.datum)})` : ' · noch nie gewogen'}</span>
+          <span class="bulk-in"><input data-bw="${i.id}" data-last="${lw ? lw.gramm : ''}" inputmode="decimal" enterkeyhint="${k < list.length - 1 ? 'next' : 'done'}" placeholder="Gewicht in g" autocomplete="off"><em class="bw-diff"></em></span></label>`;
+      }).join('')}</div>
+      <button class="btn btn-save-bottom" data-sheet="save">Alle sichern</button>`;
+    openSheet({
+      title: 'Alle wiegen', body,
+      onSave: async () => {
+        const datum = $('#bw_datum').value || nowDT();
+        const vals = [];
+        for (const el of $$('[data-bw]')) {
+          const g = num(el.value); if (g == null) continue;
+          if (g <= 0 || g > 3000) { toast(`Gewicht bei „${igelName(igelById(el.dataset.bw))}“ unplausibel.`); el.focus(); return false; }
+          vals.push({ igelId: el.dataset.bw, gramm: g });
+        }
+        if (!vals.length) { toast('Kein Gewicht eingetragen.'); return false; }
+        for (const v of vals) await save('gewichte', { ...v, datum });
+        const alarme = vals.map((v) => igelById(v.igelId)).filter((i) => weightAlarm(i)).length;
+        toast(`${vals.length} ${vals.length === 1 ? 'Gewicht' : 'Gewichte'} gespeichert${alarme ? ` · ⚠️ ${alarme}× Gewichtsalarm` : ''}`, alarme ? 4000 : 2200);
+        return true;
+      }
+    });
+  }
+  function updateBulkDiff(el) {
+    const em = el.parentElement.querySelector('.bw-diff'); const g = num(el.value); const last = num(el.dataset.last);
+    if (g == null || last == null) { em.textContent = ''; em.className = 'bw-diff'; return; }
+    const d = g - last; em.textContent = `${signed(d)} g`; em.className = 'bw-diff ' + (d > 0 ? 'up' : d < 0 ? 'down' : '');
+  }
+
+  // ---------- Schnellerfassung: Alle füttern ----------
+  function bulkFeedSheet() {
+    const list = D.igel.filter((i) => ACTIVE.has(i.status) && i.status !== 'winterschlaf').sort(byBox);
+    if (!list.length) { toast('Keine Igel zum Füttern (Winterschlaf ausgenommen).'); return; }
+    const lastF = D.futter.slice().sort((a, b) => b.datum.localeCompare(a.datum))[0];
+    openForm({
+      title: 'Alle füttern',
+      groups: [
+        [{ key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() },
+         { key: 'futter', label: 'Futter', required: true, list: FUTTER_VORSCHLAEGE, default: lastF?.futter || '' },
+         { key: 'menge', label: 'Menge pro Igel (g)', type: 'number', default: lastF?.menge ?? '' },
+         { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' }],
+        [{ key: 'igel', label: 'Gefüttert wurden', type: 'checks', required: true, options: list.map((i) => ({ v: i.id, l: igelName(i) + (i.box ? ` (Box ${i.box})` : '') })), default: list.map((i) => i.id) }]
+      ],
+      onSave: async (v) => {
+        for (const id of v.igel) await save('futter', { igelId: id, datum: v.datum, futter: v.futter, menge: v.menge, gefressen: v.gefressen });
+        toast(`Fütterung für ${v.igel.length} Igel eingetragen`); return true;
+      }
+    });
+  }
+
   // ---------- Fotos ----------
   function loadImage(file) {
     return new Promise((res, rej) => {
@@ -851,17 +1061,42 @@
     try { obj = JSON.parse(await file.text()); } catch (e) { toast('Datei ist kein gültiges Backup.'); return; }
     if (!obj || obj.app !== 'igelpflege' || !obj.data) { toast('Datei ist kein Igelpflege-Backup.'); return; }
     const n = (obj.data.igel || []).length;
-    if (!confirm(`Backup vom ${fmtD(dStr(new Date(obj.exportedAt)))} mit ${n} Igel(n) einspielen?\n\nACHTUNG: Alle aktuellen Daten auf diesem Gerät werden dabei ersetzt.`)) return;
+    openSheet({
+      title: 'Backup einspielen',
+      body: `<div class="card"><p style="margin-top:0"><strong>Backup vom ${fmtDT(dtStr(new Date(obj.exportedAt)))}</strong><br>
+        <span class="note">${n} Igel · ${(obj.data.gewichte || []).length} Wiegungen · ${(obj.data.fotos || []).length} Fotos</span></p>
+        <button class="btn" data-sheet="restoreMerge">Zusammenführen (empfohlen)</button>
+        <p class="note">Neue Einträge aus dem Backup kommen dazu. Bei Einträgen, die es auf beiden Geräten gibt, gewinnt die neuere Änderung. Auf diesem Gerät gelöschte Einträge kommen wieder, wenn sie im Backup noch enthalten sind.</p>
+        <button class="btn danger" data-sheet="restoreReplace">Alles ersetzen</button>
+        <p class="note" style="margin-bottom:0">Alle Daten auf diesem Gerät werden gelöscht und durch das Backup ersetzt.</p></div>`,
+      onOpen: (sh) => { sh._backup = obj; }
+    });
+  }
+  async function applyBackup(obj, mode) {
+    let added = 0, updated = 0, kept = 0;
     try {
       const t = db.transaction(STORES, 'readwrite');
       for (const s of DATA_STORES) {
-        const os = t.objectStore(s); os.clear();
-        for (const rec of obj.data[s] || []) os.put(s === 'fotos' ? { ...rec, full: b64ToBuf(rec.full), thumb: b64ToBuf(rec.thumb) } : rec);
+        const os = t.objectStore(s);
+        if (mode === 'replace') os.clear();
+        const local = new Map(D[s].map((x) => [x.id, x]));
+        for (const rec of obj.data[s] || []) {
+          if (mode === 'merge') {
+            const l = local.get(rec.id);
+            if (l && (l.updatedAt || '') >= (rec.updatedAt || '')) { kept++; continue; }
+            if (l) updated++; else added++;
+          }
+          os.put(s === 'fotos' ? { ...rec, full: b64ToBuf(rec.full), thumb: b64ToBuf(rec.thumb) } : rec);
+        }
       }
-      if (obj.settings) t.objectStore('settings').put({ ...DEFAULTS, ...obj.settings, id: 'main', lastBackup: dStr(new Date(obj.exportedAt)) });
+      if (mode === 'replace' && obj.settings) t.objectStore('settings').put({ ...DEFAULTS, ...obj.settings, id: 'main', lastBackup: dStr(new Date(obj.exportedAt)) });
       await txDone(t);
       for (const k of urlCache.keys()) URL.revokeObjectURL(urlCache.get(k)); urlCache.clear();
-      await loadAll(); toast('Backup eingespielt'); go({ name: 'list' }, { keepPrev: true });
+      await loadAll(); closeSheet();
+      const nrs = D.igel.map((i) => String(i.nummer || '').trim()).filter(Boolean);
+      const dup = nrs.length - new Set(nrs).size;
+      toast(mode === 'merge' ? `Zusammengeführt: ${added} neu, ${updated} aktualisiert, ${kept} unverändert${dup ? ` · ⚠️ ${dup} doppelte Pflege-Nr. – bitte prüfen` : ''}` : 'Backup eingespielt', dup ? 6000 : 3500);
+      go({ name: 'list' }, { keepPrev: true });
     } catch (e) { console.error(e); toast('Fehler beim Einspielen: ' + e.message, 5000); await loadAll(); render(); }
   }
   async function wipeAll() {
@@ -873,7 +1108,10 @@
   }
 
   // ---------- PDF ----------
+  // PDF-Standardschrift kennt kein typografisches Minus: ersetzen
+  const pdfTxt = (s) => String(s ?? '').replace(/−/g, '-').replace(/→/g, '->');
   function autoTable(doc, o) {
+    for (const k of ['head', 'body', 'foot']) if (o[k]) o[k] = o[k].map((r) => r.map(pdfTxt));
     if (typeof doc.autoTable === 'function') return doc.autoTable(o);
     const p = window.jspdf_autotable; const fn = p && (p.autoTable || p.default);
     if (fn) return fn(doc, o);
@@ -905,11 +1143,19 @@
     }
     const lw = lastWeight(i.id), fw = firstWeight(i.id);
     const stamm = [
-      ['Name', i.name], ['Pflege-Nr.', i.nummer], ['Status', STATUS_L[i.status]], ['Geschlecht', label(GESCHLECHT, i.geschlecht)], ['Alter', label(ALTER, i.alter)],
+      ['Name', i.name], ['Pflege-Nr.', i.nummer], ['Box / Gehege', i.box], ['Status', STATUS_L[i.status]], ['Geschlecht', label(GESCHLECHT, i.geschlecht)], ['Alter', label(ALTER, i.alter)],
       ['Aufnahme', fmtD(i.aufnahmeDatum)], ['Tage in Pflege', inCareDays(i) != null ? String(inCareDays(i)) : ''],
       ['Gewicht Aufnahme', fw ? `${fmtNum(fw.gramm)} g (${fmtD(fw.datum)})` : ''], ['Gewicht aktuell', lw ? `${fmtNum(lw.gramm)} g (${fmtD(lw.datum)})` : ''],
       ['Fund am', fmtD(i.fundDatum)], ['Fundort', i.fundOrt], ['Fundumstände', i.fundUmstaende], ['Finder', [i.finderName, i.finderKontakt].filter(Boolean).join(', ')],
-      ['Zustand bei Aufnahme', i.zustand], ['Abgang am', fmtD(i.abgangDatum)], ['Verbleib', i.abgangOrt], ['Notizen', i.notizen]
+      ['Zustand bei Aufnahme', i.zustand],
+      ...(() => {
+        const wi = winterInfo(i); if (!wi) return [];
+        return [
+          ['Winterschlaf', `${fmtD(wi.beginn)} – ${wi.ende ? fmtD(wi.ende) : 'laufend'} (${wi.tage} Tage)`],
+          ['Gewicht Winterschlaf', wi.wB && wi.wE ? `${fmtNum(wi.wB.gramm)} g -> ${fmtNum(wi.wE.gramm)} g${wi.verlust != null ? ` (${signed(wi.verlust)} g, ${signed(wi.pct, 1)} %)` : ''}` : '']
+        ];
+      })(),
+      ['Abgang am', fmtD(i.abgangDatum)], ['Verbleib', i.abgangOrt], ['Notizen', i.notizen]
     ].filter(([, v]) => v);
     autoTable(doc, { ...tableBase, startY: y, body: stamm, theme: 'plain', tableWidth: W - 2 * M - (p ? photoW + 4 : 0),
       columnStyles: { 0: { fontStyle: 'bold', cellWidth: 38, textColor: 90 } }, styles: { fontSize: 9.5, cellPadding: 1.2 } });
@@ -1025,6 +1271,11 @@
     addFutter: (d) => futterForm(d.id),
     editFutter: (d) => { const f = D.futter.find((x) => x.id === d.id); if (f) futterForm(f.igelId, f); },
     futterAlle: () => { ui.futterAlle = true; render(); },
+    bulkWeigh: () => bulkWeighSheet(),
+    bulkFeed: () => bulkFeedSheet(),
+    statistik: () => go({ name: 'statistik' }),
+    statJahr: (d) => { ui.statJahr = d.v; render(); },
+    csv: () => csvExport(ui.statJahr),
     backup: () => makeBackup(),
     restore: () => $('#restoreFile').click(),
     wipe: () => wipeAll(),
@@ -1032,6 +1283,7 @@
       const g = (k) => $('#s_' + k).value.trim();
       S.pflegestelle = g('pflegestelle'); S.ansprechpartner = g('ansprechpartner'); S.kontakt = g('kontakt');
       S.zielgewicht = num(g('zielgewicht')); S.wiegenTage = Math.max(1, Math.round(num(g('wiegenTage')) || 1)); S.wiegenTageWinter = Math.max(1, Math.round(num(g('wiegenTageWinter')) || 7));
+      S.alarmProzent = num(g('alarmProzent')); S.alarmTage = Math.max(1, Math.round(num(g('alarmTage')) || 3));
       await saveSettings(); toast('Einstellungen gespeichert'); render();
     }
   };
@@ -1047,6 +1299,12 @@
     },
     delete: async (el, sh) => { if (!sh._onDelete) return; const r = await sh._onDelete(); if (r === true) { closeSheet(); render(); toast('Gelöscht'); } },
     share: async (el, sh) => { if (sh._share) await sh._share(); },
+    restoreMerge: async (el, sh) => { if (sh._backup) await applyBackup(sh._backup, 'merge'); },
+    restoreReplace: async (el, sh) => {
+      if (!sh._backup) return;
+      if (!confirm('Wirklich ALLE Daten auf diesem Gerät durch das Backup ersetzen?')) return;
+      await applyBackup(sh._backup, 'replace');
+    },
     photoTitle: async (el) => { const p = D.fotos.find((x) => x.id === el.dataset.id); const i = p && igelById(p.igelId); if (!i) return; i.titelFotoId = p.id; await save('igel', i); closeSheet(); render(); toast('Titelbild gesetzt'); },
     photoShare: async (el) => { const p = D.fotos.find((x) => x.id === el.dataset.id); if (p) await shareFile(new Blob([p.full], { type: 'image/jpeg' }), `igel-${dStr(parseD(p.datum) || new Date())}.jpg`); },
     photoDel: async (el) => { if (!confirm('Foto löschen?')) return; const p = D.fotos.find((x) => x.id === el.dataset.id); if (!p) return; const i = igelById(p.igelId); if (i && i.titelFotoId === p.id) { i.titelFotoId = null; await save('igel', i); } await remove('fotos', p.id); closeSheet(); render(); toast('Foto gelöscht'); }
@@ -1071,8 +1329,16 @@
     $('#sheet').addEventListener('focusin', (e) => { if (e.target.matches('input, select, textarea')) revealField(e.target.closest('.field') || e.target); });
     $('#sheet').addEventListener('keydown', (e) => {
       // Return in einem einzeiligen Feld schließt nur die Tastatur
-      if (e.key === 'Enter' && e.target.matches('input:not([type=checkbox])')) { e.preventDefault(); e.target.blur(); }
+      if (e.key === 'Enter' && e.target.matches('input:not([type=checkbox])')) {
+        e.preventDefault();
+        if (e.target.dataset.bw) { // Alle wiegen: zum nächsten Igel springen
+          const all = $$('[data-bw]', $('#sheet')); const nxt = all[all.indexOf(e.target) + 1];
+          if (nxt) { nxt.focus(); return; }
+        }
+        e.target.blur();
+      }
     });
+    $('#sheet').addEventListener('input', (e) => { if (e.target.dataset && e.target.dataset.bw) updateBulkDiff(e.target); });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', fitSheet);
       window.visualViewport.addEventListener('scroll', fitSheet);
