@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.6.0';
+  const VERSION = '1.7.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'rechnungen', 'settings'];
@@ -23,7 +23,7 @@
   const BEFALL = [['', '–'], ['gering', 'gering'], ['mittel', 'mittel'], ['stark', 'stark']];
   const GEFRESSEN = [['alles', 'alles'], ['fast', 'fast alles'], ['haelfte', 'etwa die Hälfte'], ['wenig', 'wenig'], ['nichts', 'nichts'], ['offen', 'nicht kontrolliert']];
   const FUTTER_VORSCHLAEGE = ['Katzenfutter (Nass)', 'Katzen-Trockenfutter', 'Igel-Trockenfutter', 'Rührei (ungewürzt)', 'Hähnchen gekocht', 'Insekten', 'Aufzuchtmilch'];
-  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null, mahlzeitVorlagen: null };
+  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null, mahlzeitVorlagen: null, parasitenListe: null };
 
   // ---------- Zustand ----------
   let db;
@@ -112,6 +112,7 @@
     let init = false;
     if (!Array.isArray(S.medListe)) { S.medListe = []; init = true; }
     if (!Array.isArray(S.mahlzeitVorlagen)) { S.mahlzeitVorlagen = []; init = true; }
+    if (!Array.isArray(S.parasitenListe)) { S.parasitenListe = PARASITEN.filter((x) => x !== 'negativ').map((name) => ({ id: uid(), name, notiz: '', updatedAt: new Date().toISOString() })); init = true; }
     if (!Array.isArray(S.futterListe)) { S.futterListe = FUTTER_VORSCHLAEGE.map((name) => ({ id: uid(), name, menge: null, updatedAt: new Date().toISOString() })); init = true; }
     if (init) await saveSettings();
   }
@@ -273,7 +274,7 @@
     render();
   }
   function back() {
-    const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', mahlzeiten: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
+    const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', mahlzeiten: 'einstellungen', parasitenliste: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
     let p = parent ? { name: parent } : (ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' });
     if (ui.route.name === 'finder' && ui.prev && ui.prev.name === 'detail') p = ui.prev; // vom Igel aus geöffnet → zurück zum Igel
     if (ui.route.name === 'rechnung') p = ui.prev && ui.prev.name === 'detail' ? ui.prev : { name: 'rechnungen' };
@@ -314,6 +315,7 @@
     else if (r.name === 'medliste') { setTab('einstellungen'); view.innerHTML = viewMedListe(); }
     else if (r.name === 'futterliste') { setTab('einstellungen'); view.innerHTML = viewFutterListe(); }
     else if (r.name === 'mahlzeiten') { setTab('einstellungen'); view.innerHTML = viewMahlzeiten(); }
+    else if (r.name === 'parasitenliste') { setTab('einstellungen'); view.innerHTML = viewParasitenListe(); }
     else if (r.name === 'finderliste') { setTab('einstellungen'); view.innerHTML = viewFinderListe(); }
     else if (r.name === 'finder') { setTab('einstellungen'); view.innerHTML = viewFinder(r.key); }
     else if (r.name === 'statistik') { setTab('einstellungen'); view.innerHTML = viewStatistik(); }
@@ -707,7 +709,7 @@
         await saveSettings(); toast('Gespeichert'); return true;
       },
       onDelete: item ? async () => {
-        if (!confirm(`„${item.name}“ aus der Liste entfernen?\n\nBereits eingetragene Medikationen/Fütterungen bleiben erhalten.`)) return false;
+        if (!confirm(`„${item.name}“ aus der Liste entfernen?\n\nBereits eingetragene Einträge bleiben unverändert erhalten.`)) return false;
         S[listKey] = S[listKey].filter((x) => x.id !== item.id); await saveSettings(); return true;
       } : null,
       deleteLabel
@@ -723,6 +725,23 @@
         { key: 'proTag', label: 'Gaben pro Tag', type: 'number', default: 1 },
         { key: 'tage', label: 'Standard-Dauer in Tagen (leer = offen)', type: 'number' },
         { key: 'hinweis', label: 'Hinweis (wird beim Auswählen angezeigt)', type: 'textarea' }
+      ]
+    });
+  }
+  function viewParasitenListe() {
+    setHeader('Parasitenliste', { back: true, action: { label: '＋', aria: 'Parasit hinzufügen', fn: () => parasitForm() } });
+    const l = byName(S.parasitenListe);
+    return `<p class="note">Auswahl beim Eintragen einer Kotprobe. „negativ“ steht dort immer zusätzlich zur Verfügung. Wenn du einen Eintrag änderst oder entfernst, bleiben bereits eingetragene Befunde unverändert.</p>` +
+      (l.length ? `<div class="list">${l.map((x) => `<button class="row" data-act="editParasit" data-id="${x.id}"><span class="grow"><span class="t">${esc(x.name)}</span>${x.notiz ? `<br><span class="s">${esc(x.notiz)}</span>` : ''}</span>
+        <span class="r">${D.befunde.filter((b) => (b.ergebnis || []).includes(x.name)).length || ''}</span><span class="chev">›</span></button>`).join('')}</div>`
+        : `<div class="empty">Noch keine Parasiten angelegt.<br><br><button class="btn" data-act="addParasit" style="max-width:260px">Parasit anlegen</button></div>`);
+  }
+  function parasitForm(x = null) {
+    listItemForm({
+      listKey: 'parasitenListe', item: x, title: x ? 'Parasit bearbeiten' : 'Neuer Parasit', deleteLabel: 'Aus Liste entfernen',
+      fields: [
+        { key: 'name', label: 'Bezeichnung (z. B. „Crenosoma (Lungenwurm)“)', required: true },
+        { key: 'notiz', label: 'Notiz (z. B. übliches Mittel, Behandlungsdauer)', type: 'textarea' }
       ]
     });
   }
@@ -916,6 +935,7 @@
         <button class="row" data-act="medliste"><span class="grow"><span class="t">💊 Medikamentenliste</span><br><span class="s">Vorlagen mit Dosis, Verabreichung, Dauer</span></span><span class="r">${S.medListe.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="futterliste"><span class="grow"><span class="t">🍽️ Futterliste</span><br><span class="s">Futtersorten mit Standardmenge</span></span><span class="r">${S.futterListe.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="mahlzeiten"><span class="grow"><span class="t">🥣 Mahlzeit-Vorlagen</span><br><span class="s">Feste Mahlzeiten aus mehreren Komponenten</span></span><span class="r">${S.mahlzeitVorlagen.length}</span><span class="chev">›</span></button>
+        <button class="row" data-act="parasitenliste"><span class="grow"><span class="t">🔬 Parasitenliste</span><br><span class="s">Auswahl für Kotproben</span></span><span class="r">${S.parasitenListe.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="finderliste"><span class="grow"><span class="t">👤 Finderliste</span><br><span class="s">Alle Finder mit Kontakt und ihren Igeln</span></span><span class="r">${finderList().length}</span><span class="chev">›</span></button>
       </div>
       <div class="section-title">Pflegestelle (erscheint im PDF)</div>
@@ -1224,16 +1244,34 @@
   }
 
   // ---------- Formulare: Kotprobe ----------
+  // Auswahl: „negativ“ + Parasitenliste + ältere Befund-Einträge, die nicht (mehr) in der Liste stehen
+  function befundOptionen(b) {
+    const namen = byName(S.parasitenListe).map((x) => x.name);
+    const extra = ((b && b.ergebnis) || []).filter((x) => x !== 'negativ' && !namen.includes(x));
+    return ['negativ', ...namen, ...extra];
+  }
   function befundForm(igelId, b = null) {
     openForm({
       title: b ? 'Kotprobe bearbeiten' : 'Neue Kotprobe',
       groups: [
         [{ key: 'datum', label: 'Datum', type: 'date', required: true, default: today() }, { key: 'untersucher', label: 'Untersucht von (Tierarzt / Labor / selbst)' }],
-        [{ key: 'ergebnis', label: 'Befund', type: 'checks', options: PARASITEN }, { key: 'befall', label: 'Befallsgrad', type: 'select', options: opts(BEFALL) }],
+        [{ key: 'ergebnis', label: 'Befund', type: 'checks', options: befundOptionen(b) },
+         { key: 'neuParasit', label: 'Anderer Parasit (nicht in der Liste)', placeholder: 'optional' },
+         merkenField('Neuen Parasiten in die Parasitenliste aufnehmen'),
+         { key: 'befall', label: 'Befallsgrad', type: 'select', options: opts(BEFALL) }],
         [{ key: 'kontrolleAm', label: 'Kontrolle geplant am', type: 'date' }, { key: 'notiz', label: 'Notiz', type: 'textarea' }]
       ],
       values: b || {},
-      onSave: async (v) => { await save('befunde', { ...(b || { igelId }), ...v }); toast('Kotprobe gespeichert'); return true; },
+      onSave: async (v) => {
+        const neu = (v.neuParasit || '').trim(); const merken = (v.merken || []).includes('ja');
+        delete v.neuParasit; delete v.merken;
+        v.ergebnis = v.ergebnis || [];
+        if (neu && !v.ergebnis.some((x) => x.toLowerCase() === neu.toLowerCase())) v.ergebnis.push(neu);
+        if (v.ergebnis.includes('negativ') && v.ergebnis.length > 1) { toast('„negativ“ und ein Parasit gleichzeitig – bitte prüfen.'); return false; }
+        await save('befunde', { ...(b || { igelId }), ...v });
+        const aufgenommen = neu && merken && await addToList('parasitenListe', { name: neu, notiz: '' });
+        toast(aufgenommen ? 'Kotprobe gespeichert · Parasit in Liste aufgenommen' : 'Kotprobe gespeichert'); return true;
+      },
       onDelete: b ? async () => { if (!confirm('Kotprobe löschen?')) return false; await remove('befunde', b.id); return true; } : null
     });
   }
@@ -1796,7 +1834,7 @@
           }
           return out;
         };
-        t.objectStore('settings').put({ ...S, medListe: mergeList(S.medListe, obj.settings.medListe), futterListe: mergeList(S.futterListe, obj.settings.futterListe), mahlzeitVorlagen: mergeList(S.mahlzeitVorlagen, obj.settings.mahlzeitVorlagen) });
+        t.objectStore('settings').put({ ...S, medListe: mergeList(S.medListe, obj.settings.medListe), futterListe: mergeList(S.futterListe, obj.settings.futterListe), mahlzeitVorlagen: mergeList(S.mahlzeitVorlagen, obj.settings.mahlzeitVorlagen), parasitenListe: mergeList(S.parasitenListe, obj.settings.parasitenListe) });
       }
       if (mode === 'replace' && obj.settings) t.objectStore('settings').put({ ...DEFAULTS, ...obj.settings, id: 'main', lastBackup: dStr(new Date(obj.exportedAt)) });
       await txDone(t);
@@ -2051,6 +2089,9 @@
     finderCsv: () => finderCsv(),
     futterliste: () => go({ name: 'futterliste' }),
     mahlzeiten: () => go({ name: 'mahlzeiten' }),
+    parasitenliste: () => go({ name: 'parasitenliste' }),
+    addParasit: () => parasitForm(),
+    editParasit: (d) => { const x = S.parasitenListe.find((y) => y.id === d.id); if (x) parasitForm(x); },
     addVorlage: () => vorlageForm(),
     editVorlage: (d) => { const v = S.mahlzeitVorlagen.find((x) => x.id === d.id); if (v) vorlageForm(v); },
     futterMehr: () => { ui.futterTage = (ui.futterTage || 14) + 14; render(); },
