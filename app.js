@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'rechnungen', 'settings'];
@@ -23,7 +23,7 @@
   const BEFALL = [['', '–'], ['gering', 'gering'], ['mittel', 'mittel'], ['stark', 'stark']];
   const GEFRESSEN = [['alles', 'alles'], ['fast', 'fast alles'], ['haelfte', 'etwa die Hälfte'], ['wenig', 'wenig'], ['nichts', 'nichts'], ['offen', 'nicht kontrolliert']];
   const FUTTER_VORSCHLAEGE = ['Katzenfutter (Nass)', 'Katzen-Trockenfutter', 'Igel-Trockenfutter', 'Rührei (ungewürzt)', 'Hähnchen gekocht', 'Insekten', 'Aufzuchtmilch'];
-  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null };
+  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null, mahlzeitVorlagen: null };
 
   // ---------- Zustand ----------
   let db;
@@ -111,6 +111,7 @@
     // Listen beim ersten Start anlegen (Futterliste mit Vorschlägen, Medikamentenliste leer)
     let init = false;
     if (!Array.isArray(S.medListe)) { S.medListe = []; init = true; }
+    if (!Array.isArray(S.mahlzeitVorlagen)) { S.mahlzeitVorlagen = []; init = true; }
     if (!Array.isArray(S.futterListe)) { S.futterListe = FUTTER_VORSCHLAEGE.map((name) => ({ id: uid(), name, menge: null, updatedAt: new Date().toISOString() })); init = true; }
     if (init) await saveSettings();
   }
@@ -267,12 +268,12 @@
   function go(route, opts2 = {}) {
     if (opts2.keepPrev !== true) ui.prev = ui.route;
     ui.route = route;
-    if (route.name === 'detail' && !opts2.keepTab) { ui.detailTab = 'uebersicht'; ui.futterAlle = false; ui.gabenAlle = false; }
+    if (route.name === 'detail' && !opts2.keepTab) { ui.detailTab = 'uebersicht'; ui.futterAlle = false; ui.futterTage = 14; ui.gabenAlle = false; }
     window.scrollTo(0, 0);
     render();
   }
   function back() {
-    const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
+    const parent = { medliste: 'einstellungen', futterliste: 'einstellungen', mahlzeiten: 'einstellungen', finderliste: 'einstellungen', statistik: 'einstellungen', finder: 'finderliste' }[ui.route.name];
     let p = parent ? { name: parent } : (ui.prev && ui.prev.name !== 'detail' ? ui.prev : { name: 'list' });
     if (ui.route.name === 'finder' && ui.prev && ui.prev.name === 'detail') p = ui.prev; // vom Igel aus geöffnet → zurück zum Igel
     if (ui.route.name === 'rechnung') p = ui.prev && ui.prev.name === 'detail' ? ui.prev : { name: 'rechnungen' };
@@ -312,6 +313,7 @@
     }
     else if (r.name === 'medliste') { setTab('einstellungen'); view.innerHTML = viewMedListe(); }
     else if (r.name === 'futterliste') { setTab('einstellungen'); view.innerHTML = viewFutterListe(); }
+    else if (r.name === 'mahlzeiten') { setTab('einstellungen'); view.innerHTML = viewMahlzeiten(); }
     else if (r.name === 'finderliste') { setTab('einstellungen'); view.innerHTML = viewFinderListe(); }
     else if (r.name === 'finder') { setTab('einstellungen'); view.innerHTML = viewFinder(r.key); }
     else if (r.name === 'statistik') { setTab('einstellungen'); view.innerHTML = viewStatistik(); }
@@ -559,14 +561,31 @@
 
   function detailFutter(i) {
     const fs = byIgel('futter', i.id).sort((a, b) => b.datum.localeCompare(a.datum));
-    const shown = ui.futterAlle ? fs : fs.slice(0, 40);
+    const groups = [];
+    for (const f of fs) { const d = dayOf(f.datum); let g = groups[groups.length - 1]; if (!g || g.day !== d) { g = { day: d, items: [] }; groups.push(g); } g.items.push(f); }
+    const nTage = ui.futterTage || 14; const shown = groups.slice(0, nTage); const t = today();
+    const gefCls = (g) => ({ alles: 'ausgewildert', fast: 'ausgewildert', haelfte: 'aufnahme', wenig: 'verstorben-rot', nichts: 'verstorben-rot' }[g] || '');
+    const heuteFehlt = ACTIVE.has(i.status) && i.status !== 'winterschlaf' && (!groups.length || groups[0].day !== t);
     return `
-      <button class="btn" data-act="addFutter" data-id="${i.id}">🍽️ Fütterung eintragen</button>
-      <div class="section-title">Futterprotokoll (${fs.length})</div>
-      ${fs.length ? `<div class="list">${shown.map((f) => `<button class="row" data-act="editFutter" data-id="${f.id}">
-        <span class="grow"><span class="t">${esc(f.futter || 'Futter')}</span>${f.menge != null ? ` <span class="s">${fmtNum(f.menge)} g</span>` : ''}<br>
-        <span class="s">${fmtDT(f.datum)} · gefressen: ${esc(label(GEFRESSEN, f.gefressen))}${f.notiz ? ' · ' + esc(f.notiz) : ''}</span></span><span class="chev">›</span></button>`).join('')}</div>
-        ${fs.length > shown.length ? `<button class="btn secondary" data-act="futterAlle">Alle ${fs.length} Einträge anzeigen</button>` : ''}` : '<div class="empty">Noch keine Fütterung eingetragen.</div>'}`;
+      <button class="btn" data-act="addFutter" data-id="${i.id}">🍽️ Mahlzeit eintragen</button>
+      <div class="section-title">Futterprotokoll · ${groups.length} ${groups.length === 1 ? 'Tag' : 'Tage'}, ${fs.length} ${fs.length === 1 ? 'Mahlzeit' : 'Mahlzeiten'}</div>
+      ${heuteFehlt ? `<div class="day-card"><div class="day-card-head"><span class="dch-date">${parseD(t).toLocaleDateString('de-DE', { weekday: 'long' })}, ${fmtD(t)}</span><span class="chip pflege">heute</span></div><div class="card note" style="margin:0">Heute noch keine Mahlzeit eingetragen.</div></div>` : ''}
+      ${shown.map((g) => {
+        const sum = g.items.reduce((x, f) => x + (mealSum(f) || 0), 0); const hasSum = g.items.some((f) => mealSum(f) != null);
+        const diff = daysBetween(g.day, t);
+        return `<div class="day-card">
+          <div class="day-card-head"><span class="dch-date">${parseD(g.day).toLocaleDateString('de-DE', { weekday: 'long' })}, ${fmtD(g.day)}</span>
+            ${diff === 0 ? '<span class="chip pflege">heute</span>' : diff === 1 ? '<span class="chip">gestern</span>' : ''}
+            <span class="dch-sum">${g.items.length} ${g.items.length === 1 ? 'Mahlzeit' : 'Mahlzeiten'}${hasSum ? ` · <strong>${fmtNum(sum)} g</strong>` : ''}</span></div>
+          <div class="list">${g.items.slice().sort((a, b) => a.datum.localeCompare(b.datum)).map((f) => `<button class="row meal" data-act="editFutter" data-id="${f.id}">
+            <span class="time">${esc(String(f.datum).slice(11, 16) || '–')}</span>
+            <span class="grow"><span class="meal-komps">${komps(f).map((k) => `<span class="mk"><span>${esc(k.futter)}</span>${k.menge != null ? `<b>${fmtNum(k.menge)} g</b>` : ''}</span>`).join('')}</span>
+              <span class="s">${f.gefressen && f.gefressen !== 'offen' ? `<span class="chip ${gefCls(f.gefressen)}">${esc(label(GEFRESSEN, f.gefressen))}</span> ` : '<span class="chip">nicht kontrolliert</span> '}${f.notiz ? esc(f.notiz) : ''}</span></span>
+<span class="chev">›</span></button>`).join('')}</div>
+        </div>`;
+      }).join('')}
+      ${!fs.length ? '<div class="empty">Noch keine Mahlzeit eingetragen.</div>' : ''}
+      ${groups.length > shown.length ? `<button class="btn secondary" data-act="futterMehr">Ältere Tage anzeigen (${groups.length - shown.length} weitere)</button>` : ''}`;
   }
 
   // ---------- Diagramm ----------
@@ -896,6 +915,7 @@
       <div class="list">
         <button class="row" data-act="medliste"><span class="grow"><span class="t">💊 Medikamentenliste</span><br><span class="s">Vorlagen mit Dosis, Verabreichung, Dauer</span></span><span class="r">${S.medListe.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="futterliste"><span class="grow"><span class="t">🍽️ Futterliste</span><br><span class="s">Futtersorten mit Standardmenge</span></span><span class="r">${S.futterListe.length}</span><span class="chev">›</span></button>
+        <button class="row" data-act="mahlzeiten"><span class="grow"><span class="t">🥣 Mahlzeit-Vorlagen</span><br><span class="s">Feste Mahlzeiten aus mehreren Komponenten</span></span><span class="r">${S.mahlzeitVorlagen.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="finderliste"><span class="grow"><span class="t">👤 Finderliste</span><br><span class="s">Alle Finder mit Kontakt und ihren Igeln</span></span><span class="r">${finderList().length}</span><span class="chev">›</span></button>
       </div>
       <div class="section-title">Pflegestelle (erscheint im PDF)</div>
@@ -1251,27 +1271,113 @@
     });
   }
 
-  // ---------- Formulare: Futter ----------
+  // ---------- Mahlzeiten (Fütterung mit mehreren Komponenten) ----------
+  // Eine Fütterung = eine Mahlzeit: { igelId, datum, komponenten: [{ futter, menge }], gefressen, notiz }
+  // Ältere Einträge (nur futter/menge) werden als Mahlzeit mit einer Komponente behandelt.
+  const komps = (f) => (Array.isArray(f.komponenten) && f.komponenten.length ? f.komponenten : (f.futter ? [{ futter: f.futter, menge: f.menge ?? null }] : []));
+  const kompSum = (ks) => { const m = ks.filter((k) => k.menge != null); return m.length ? m.reduce((s, k) => s + k.menge, 0) : null; };
+  const mealSum = (f) => kompSum(komps(f));
+  const kompText = (ks) => ks.map((k) => k.futter + (k.menge != null ? ` ${fmtNum(k.menge)} g` : '')).join(', ');
+  const lastMeal = (igelId) => (igelId ? byIgel('futter', igelId) : D.futter).slice().sort((a, b) => b.datum.localeCompare(a.datum))[0] || null;
+
+  // Auswahl-Liste: alle Sorten der Futterliste zum Ankreuzen, jeweils mit Menge
+  function mealPickerHtml(ks, { mengeLabel = 'g' } = {}) {
+    const sel = new Map(ks.map((k) => [k.futter.trim().toLowerCase(), k]));
+    const rows = byName(S.futterListe).map((f) => ({ name: f.name, std: f.menge, k: sel.get(f.name.trim().toLowerCase()) }));
+    const known = new Set(rows.map((r) => r.name.trim().toLowerCase()));
+    for (const k of ks) if (!known.has(k.futter.trim().toLowerCase())) rows.push({ name: k.futter, std: null, k, extra: true });
+    const vl = byName(S.mahlzeitVorlagen);
+    return `
+      ${vl.length ? `<div class="form"><label class="field"><span>Mahlzeit-Vorlage wählen</span><select id="mp_vorlage"><option value="">– auswählen –</option>${vl.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select></label></div>` : ''}
+      <div class="section-title" style="margin-top:6px">Komponenten <span class="mp-sum" id="mp_sum"></span></div>
+      <div class="form mp" id="mp">
+        ${rows.length ? rows.map((r) => mpRowHtml(r.name, r.k ? r.k.menge : null, !!r.k, r.std, r.extra)).join('') : '<p class="note" style="padding:10px 14px;margin:0" id="mp_leer">Deine Futterliste ist noch leer. Lege Sorten unter Einstellungen → Futterliste an oder trage unten eine andere Sorte ein.</p>'}
+      </div>
+      <div class="form">
+        <div class="field"><span>Andere Sorte hinzufügen</span>
+          <span class="mp-add"><input id="mp_neu" placeholder="Futtersorte" autocomplete="off" enterkeyhint="done"><input id="mp_neu_menge" inputmode="decimal" placeholder="${esc(mengeLabel)}" autocomplete="off"><button class="btn small" data-sheet="mpAdd" type="button">＋</button></span>
+        </div>
+        <label class="field checks-field"><span class="checks"><label><input type="checkbox" id="mp_merken"> Neue Sorten in die Futterliste aufnehmen</label></span></label>
+      </div>`;
+  }
+  function mpRowHtml(name, menge, checked, std, extra = false) {
+    return `<div class="mp-row${checked ? ' on' : ''}" data-name="${esc(name)}" data-std="${std ?? ''}"${extra ? ' data-extra="1"' : ''}>
+      <label class="mp-label"><input type="checkbox" class="mp-check"${checked ? ' checked' : ''}><span>${esc(name)}${extra ? ' <em class="note">(nicht in Liste)</em>' : ''}</span></label>
+      <span class="mp-menge-wrap"><input class="mp-menge" inputmode="decimal" placeholder="${std != null ? fmtNum(std) : 'g'}" value="${menge != null ? String(menge).replace('.', ',') : ''}" autocomplete="off"><em>g</em></span>
+    </div>`;
+  }
+  function mpUpdateSum() {
+    const el = $('#mp_sum'); if (!el) return;
+    const ks = readMeal(); const s = kompSum(ks);
+    el.textContent = ks.length ? `${ks.length} ausgewählt${s != null ? ` · ${fmtNum(s)} g` : ''}` : 'nichts ausgewählt';
+  }
+  function readMeal() {
+    return $$('#mp .mp-row').filter((r) => $('.mp-check', r).checked).map((r) => ({ futter: r.dataset.name, menge: num($('.mp-menge', r).value) }));
+  }
+  function mpSetChecked(row, on) {
+    $('.mp-check', row).checked = on; row.classList.toggle('on', on);
+    const mi = $('.mp-menge', row);
+    if (on && !mi.value && row.dataset.std) mi.value = String(row.dataset.std).replace('.', ',');
+  }
+  function mpAddRow(name, menge) {
+    name = String(name || '').trim(); if (!name) return null;
+    const mp = $('#mp'); const leer = $('#mp_leer'); if (leer) leer.remove();
+    let row = $$('.mp-row', mp).find((r) => r.dataset.name.trim().toLowerCase() === name.toLowerCase());
+    if (!row) { mp.insertAdjacentHTML('beforeend', mpRowHtml(name, menge, true, null, true)); row = mp.lastElementChild; row.dataset.neu = '1'; }
+    mpSetChecked(row, true); if (menge != null) $('.mp-menge', row).value = String(menge).replace('.', ',');
+    return row;
+  }
+  function mpApplyVorlage(id) {
+    const v = S.mahlzeitVorlagen.find((x) => x.id === id); if (!v) return;
+    $$('#mp .mp-row').forEach((r) => { mpSetChecked(r, false); $('.mp-menge', r).value = ''; });
+    for (const k of v.komponenten) mpAddRow(k.futter, k.menge);
+    mpUpdateSum();
+  }
+  async function mpSaveNewToList() {
+    if (!$('#mp_merken')?.checked) return 0;
+    let n = 0;
+    for (const r of $$('#mp .mp-row').filter((x) => x.dataset.extra && $('.mp-check', x).checked)) if (await addToList('futterListe', { name: r.dataset.name, menge: num($('.mp-menge', r).value) })) n++;
+    return n;
+  }
+  async function mpSaveVorlage(ks) {
+    if (!$('#mv_save')?.checked) return true;
+    const name = ($('#mv_name').value || '').trim();
+    if (!name) { toast('Bitte einen Namen für die Vorlage angeben.'); $('#mv_name').focus(); return false; }
+    const ex = S.mahlzeitVorlagen.find((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+    if (ex) { ex.komponenten = ks; ex.updatedAt = new Date().toISOString(); }
+    else S.mahlzeitVorlagen.push({ id: uid(), name, komponenten: ks, updatedAt: new Date().toISOString() });
+    await saveSettings(); return true;
+  }
+  const vorlageSaveHtml = () => `<div class="form">
+      <label class="field checks-field"><span class="checks"><label><input type="checkbox" id="mv_save"> Diese Mahlzeit als Vorlage speichern</label></span></label>
+      <label class="field"><span>Name der Vorlage (z. B. „Abendportion“)</span><input id="mv_name" autocomplete="off"></label>
+    </div>`;
+
   function futterForm(igelId, f = null) {
-    const last = byIgel('futter', igelId).sort((a, b) => b.datum.localeCompare(a.datum))[0];
-    openForm({
-      title: f ? 'Fütterung bearbeiten' : `Fütterung – ${igelName(igelById(igelId))}`,
-      groups: [[
-        { key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() },
-        ...futterPickField(),
-        { key: 'futter', label: 'Futter', required: true, list: S.futterListe.map((x) => x.name), default: f ? '' : last?.futter || '' },
-        { key: 'menge', label: 'Menge (g)', type: 'number', default: f ? '' : last?.menge ?? '' },
-        { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' },
-        { key: 'notiz', label: 'Notiz (Kot, Trinken, Auffälligkeiten)' }
-      ], ...(f ? [] : [[merkenField('In die Futterliste aufnehmen (falls neu)')]])],
-      values: f || {},
-      onSave: async (v) => {
-        const merken = (v.merken || []).includes('ja'); delete v.merken; delete v.vorlage;
-        await save('futter', { ...(f || { igelId }), ...v });
-        const neu = merken && await addToList('futterListe', { name: v.futter, menge: v.menge });
-        toast(neu ? 'Fütterung gespeichert · in Liste aufgenommen' : 'Fütterung gespeichert'); return true;
+    const vorlage = f ? null : lastMeal(igelId);
+    const ks = f ? komps(f) : (vorlage ? komps(vorlage) : []);
+    const fDatum = { key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() };
+    const fGef = { key: 'gefressen', label: 'Gefressen (ganze Mahlzeit)', type: 'select', options: opts(GEFRESSEN), default: 'offen' };
+    const fNotiz = { key: 'notiz', label: 'Notiz (Kot, Trinken, Auffälligkeiten)' };
+    const v0 = f || {};
+    openSheet({
+      title: f ? 'Mahlzeit bearbeiten' : `Mahlzeit – ${igelName(igelById(igelId))}`,
+      body: `<div class="form">${fieldHtml(fDatum, v0.datum)}</div>
+        ${!f && vorlage ? `<p class="note">Vorbelegt mit der letzten Mahlzeit vom ${fmtDT(vorlage.datum)}.</p>` : ''}
+        ${mealPickerHtml(ks)}
+        <div class="form">${fieldHtml(fGef, v0.gefressen)}${fieldHtml(fNotiz, v0.notiz)}</div>
+        ${vorlageSaveHtml()}
+        <button class="btn btn-save-bottom" data-sheet="save">Sichern</button>
+        ${f ? '<button class="btn danger" data-sheet="delete">Mahlzeit löschen</button>' : ''}`,
+      onSave: async () => {
+        const datum = readField(fDatum); if (!datum) { toast('Bitte Zeitpunkt angeben.'); return false; }
+        const k = readMeal(); if (!k.length) { toast('Bitte mindestens eine Komponente auswählen.'); return false; }
+        if (!(await mpSaveVorlage(k))) return false;
+        const neu = await mpSaveNewToList();
+        await save('futter', { ...(f || { igelId }), datum, komponenten: k, futter: k.map((x) => x.futter).join(', '), menge: kompSum(k), gefressen: readField(fGef), notiz: readField(fNotiz) });
+        toast(`Mahlzeit gespeichert${neu ? ` · ${neu} neue Sorte${neu > 1 ? 'n' : ''} in Liste` : ''}`); return true;
       },
-      onDelete: f ? async () => { if (!confirm('Eintrag löschen?')) return false; await remove('futter', f.id); return true; } : null
+      onOpen: (sh) => { sh._onDelete = f ? async () => { if (!confirm('Diese Mahlzeit löschen?')) return false; await remove('futter', f.id); return true; } : null; mpUpdateSum(); }
     });
   }
 
@@ -1317,22 +1423,61 @@
   function bulkFeedSheet() {
     const list = D.igel.filter((i) => ACTIVE.has(i.status) && i.status !== 'winterschlaf').sort(byBox);
     if (!list.length) { toast('Keine Igel zum Füttern (Winterschlaf ausgenommen).'); return; }
-    const lastF = D.futter.slice().sort((a, b) => b.datum.localeCompare(a.datum))[0];
-    openForm({
+    const lastF = lastMeal(null);
+    const fDatum = { key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() };
+    const fGef = { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' };
+    const fIgel = { key: 'igel', label: 'Gefüttert wurden', type: 'checks', options: list.map((i) => ({ v: i.id, l: igelName(i) + (i.box ? ` (Box ${i.box})` : '') })), default: list.map((i) => i.id) };
+    openSheet({
       title: 'Alle füttern',
-      groups: [
-        [{ key: 'datum', label: 'Zeitpunkt', type: 'datetime', required: true, default: nowDT() },
-         ...futterPickField(),
-         { key: 'futter', label: 'Futter', required: true, list: S.futterListe.map((x) => x.name), default: lastF?.futter || '' },
-         { key: 'menge', label: 'Menge pro Igel (g)', type: 'number', default: lastF?.menge ?? '' },
-         { key: 'gefressen', label: 'Gefressen', type: 'select', options: opts(GEFRESSEN), default: 'offen' }],
-        [{ key: 'igel', label: 'Gefüttert wurden', type: 'checks', required: true, options: list.map((i) => ({ v: i.id, l: igelName(i) + (i.box ? ` (Box ${i.box})` : '') })), default: list.map((i) => i.id) }],
-        [merkenField('In die Futterliste aufnehmen (falls neu)')]
-      ],
-      onSave: async (v) => {
-        for (const id of v.igel) await save('futter', { igelId: id, datum: v.datum, futter: v.futter, menge: v.menge, gefressen: v.gefressen });
-        if ((v.merken || []).includes('ja')) await addToList('futterListe', { name: v.futter, menge: v.menge });
-        toast(`Fütterung für ${v.igel.length} Igel eingetragen`); return true;
+      body: `<div class="form">${fieldHtml(fDatum)}</div>
+        <p class="note">Alle ausgewählten Igel bekommen dieselbe Mahlzeit. Mengen gelten pro Igel.${lastF ? ` Vorbelegt mit der letzten Mahlzeit vom ${fmtDT(lastF.datum)}.` : ''}</p>
+        ${mealPickerHtml(lastF ? komps(lastF) : [])}
+        <div class="form">${fieldHtml(fGef)}</div>
+        <div class="form">${fieldHtml(fIgel)}</div>
+        ${vorlageSaveHtml()}
+        <button class="btn btn-save-bottom" data-sheet="save">Für alle sichern</button>`,
+      onSave: async () => {
+        const datum = readField(fDatum); if (!datum) { toast('Bitte Zeitpunkt angeben.'); return false; }
+        const k = readMeal(); if (!k.length) { toast('Bitte mindestens eine Komponente auswählen.'); return false; }
+        const ids = readField(fIgel); if (!ids.length) { toast('Bitte mindestens einen Igel auswählen.'); return false; }
+        if (!(await mpSaveVorlage(k))) return false;
+        await mpSaveNewToList();
+        const gef = readField(fGef);
+        for (const id of ids) await save('futter', { igelId: id, datum, komponenten: k.map((x) => ({ ...x })), futter: k.map((x) => x.futter).join(', '), menge: kompSum(k), gefressen: gef, notiz: '' });
+        toast(`Mahlzeit für ${ids.length} Igel eingetragen`); return true;
+      },
+      onOpen: () => mpUpdateSum()
+    });
+  }
+
+  // ---------- Mahlzeit-Vorlagen verwalten ----------
+  function viewMahlzeiten() {
+    setHeader('Mahlzeit-Vorlagen', { back: true, action: { label: '＋', aria: 'Vorlage anlegen', fn: () => vorlageForm() } });
+    const l = byName(S.mahlzeitVorlagen);
+    return `<p class="note">Feste Mahlzeiten aus mehreren Komponenten, z. B. „Abendportion“. Beim Füttern wählst du die Vorlage, und alle Komponenten samt Mengen werden mit einem Tipp übernommen.</p>` +
+      (l.length ? `<div class="list">${l.map((v) => `<button class="row" data-act="editVorlage" data-id="${v.id}"><span class="grow"><span class="t">${esc(v.name)}</span><br>
+        <span class="s">${esc(kompText(v.komponenten))}</span></span><span class="r">${kompSum(v.komponenten) != null ? `${fmtNum(kompSum(v.komponenten))} g` : ''}</span><span class="chev">›</span></button>`).join('')}</div>`
+        : `<div class="empty">Noch keine Vorlagen angelegt.<br><br><button class="btn" data-act="addVorlage" style="max-width:260px">Vorlage anlegen</button><br><br><span class="note">Oder beim Füttern „Als Vorlage speichern“ anhaken.</span></div>`);
+  }
+  function vorlageForm(v = null) {
+    openSheet({
+      title: v ? 'Vorlage bearbeiten' : 'Neue Vorlage',
+      body: `<div class="form"><label class="field"><span>Name der Vorlage <span class="req">*</span></span><input id="mv_edit_name" value="${esc(v ? v.name : '')}" autocomplete="off"></label></div>
+        ${mealPickerHtml(v ? v.komponenten : []).replace(/<div class="form"><label class="field"><span>Mahlzeit-Vorlage wählen[\s\S]*?<\/select><\/label><\/div>/, '')}
+        <button class="btn btn-save-bottom" data-sheet="save">Sichern</button>
+        ${v ? '<button class="btn danger" data-sheet="delete">Vorlage löschen</button>' : ''}`,
+      onSave: async () => {
+        const name = $('#mv_edit_name').value.trim(); if (!name) { toast('Bitte einen Namen angeben.'); return false; }
+        if (S.mahlzeitVorlagen.some((x) => x.id !== v?.id && x.name.trim().toLowerCase() === name.toLowerCase())) { toast(`„${name}“ gibt es schon.`); return false; }
+        const k = readMeal(); if (!k.length) { toast('Bitte mindestens eine Komponente auswählen.'); return false; }
+        await mpSaveNewToList();
+        const obj = { ...(v || { id: uid() }), name, komponenten: k, updatedAt: new Date().toISOString() };
+        const i = S.mahlzeitVorlagen.findIndex((x) => x.id === obj.id); if (i >= 0) S.mahlzeitVorlagen[i] = obj; else S.mahlzeitVorlagen.push(obj);
+        await saveSettings(); toast('Vorlage gespeichert'); return true;
+      },
+      onOpen: (sh) => {
+        sh._onDelete = v ? async () => { if (!confirm(`Vorlage „${v.name}“ löschen?`)) return false; S.mahlzeitVorlagen = S.mahlzeitVorlagen.filter((x) => x.id !== v.id); await saveSettings(); return true; } : null;
+        mpUpdateSum();
       }
     });
   }
@@ -1651,7 +1796,7 @@
           }
           return out;
         };
-        t.objectStore('settings').put({ ...S, medListe: mergeList(S.medListe, obj.settings.medListe), futterListe: mergeList(S.futterListe, obj.settings.futterListe) });
+        t.objectStore('settings').put({ ...S, medListe: mergeList(S.medListe, obj.settings.medListe), futterListe: mergeList(S.futterListe, obj.settings.futterListe), mahlzeitVorlagen: mergeList(S.mahlzeitVorlagen, obj.settings.mahlzeitVorlagen) });
       }
       if (mode === 'replace' && obj.settings) t.objectStore('settings').put({ ...DEFAULTS, ...obj.settings, id: 'main', lastBackup: dStr(new Date(obj.exportedAt)) });
       await txDone(t);
@@ -1819,8 +1964,22 @@
     const fs = byIgel('futter', i.id).sort((a, b) => a.datum.localeCompare(b.datum));
     section('Futterprotokoll');
     if (fs.length) {
-      autoTable(doc, { ...tableBase, startY: y, head: [['Zeitpunkt', 'Futter', 'Menge', 'Gefressen', 'Notiz']],
-        body: fs.map((f) => [fmtDT(f.datum), f.futter || '', f.menge != null ? `${fmtNum(f.menge)} g` : '', label(GEFRESSEN, f.gefressen), f.notiz || '']) });
+      // Je Mahlzeit eine Zeile, Komponenten untereinander; nach jedem Tag eine Summenzeile
+      const body = []; const sumRows = new Set();
+      let k = 0;
+      while (k < fs.length) {
+        const day = dayOf(fs[k].datum); let sum = 0; let has = false; let n = 0;
+        while (k < fs.length && dayOf(fs[k].datum) === day) {
+          const f = fs[k]; const s0 = mealSum(f); if (s0 != null) { sum += s0; has = true; }
+          body.push([n === 0 ? fmtD(day) : '', String(f.datum).slice(11, 16), komps(f).map((x) => x.futter + (x.menge != null ? ` (${fmtNum(x.menge)} g)` : '')).join('\n'), s0 != null ? `${fmtNum(s0)} g` : '', label(GEFRESSEN, f.gefressen), f.notiz || '']);
+          k++; n++;
+        }
+        sumRows.add(body.length);
+        body.push(['', '', `Tag gesamt (${n} ${n === 1 ? 'Mahlzeit' : 'Mahlzeiten'})`, has ? `${fmtNum(sum)} g` : '', '', '']);
+      }
+      autoTable(doc, { ...tableBase, startY: y, head: [['Datum', 'Uhrzeit', 'Komponenten', 'Menge', 'Gefressen', 'Notiz']], body,
+        columnStyles: { 0: { cellWidth: 21 }, 1: { cellWidth: 14 }, 3: { cellWidth: 16 } },
+        didParseCell: (h) => { if (h.section === 'body' && sumRows.has(h.row.index)) { h.cell.styles.fontStyle = 'bold'; h.cell.styles.fillColor = [230, 236, 224]; } } });
       y = endY() + 7;
     } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.text('Keine Fütterungen.', M, y + 4); y += 10; }
 
@@ -1891,6 +2050,10 @@
     openFinder: (d) => go({ name: 'finder', key: d.key }),
     finderCsv: () => finderCsv(),
     futterliste: () => go({ name: 'futterliste' }),
+    mahlzeiten: () => go({ name: 'mahlzeiten' }),
+    addVorlage: () => vorlageForm(),
+    editVorlage: (d) => { const v = S.mahlzeitVorlagen.find((x) => x.id === d.id); if (v) vorlageForm(v); },
+    futterMehr: () => { ui.futterTage = (ui.futterTage || 14) + 14; render(); },
     addMedListe: () => medListeForm(),
     editMedListe: (d) => { const m = S.medListe.find((x) => x.id === d.id); if (m) medListeForm(m); },
     addFutterListe: () => futterListeForm(),
@@ -1920,6 +2083,11 @@
     },
     delete: async (el, sh) => { if (!sh._onDelete) return; const r = await sh._onDelete(); if (r === true) { closeSheet(); render(); toast('Gelöscht'); } },
     share: async (el, sh) => { if (sh._share) await sh._share(); },
+    mpAdd: () => {
+      const n = $('#mp_neu'); const m = $('#mp_neu_menge'); if (!n || !n.value.trim()) { toast('Bitte eine Futtersorte eintippen.'); n?.focus(); return; }
+      const row = mpAddRow(n.value, num(m.value)); n.value = ''; m.value = ''; mpUpdateSum();
+      if (row) row.scrollIntoView({ block: 'nearest' });
+    },
     belegShare: async (el) => {
       const p = D.fotos.find((x) => x.id === el.dataset.id); if (!p) return;
       const r = D.rechnungen.find((x) => x.id === p.rechnungId);
@@ -1961,6 +2129,7 @@
       // Return in einem einzeiligen Feld schließt nur die Tastatur
       if (e.key === 'Enter' && e.target.matches('input:not([type=checkbox])')) {
         e.preventDefault();
+        if (e.target.id === 'mp_neu' || e.target.id === 'mp_neu_menge') { sheetActions.mpAdd(); return; }
         if (e.target.dataset.bw) { // Alle wiegen: zum nächsten Igel springen
           const all = $$('[data-bw]', $('#sheet')); const nxt = all[all.indexOf(e.target) + 1];
           if (nxt) { nxt.focus(); return; }
@@ -1968,7 +2137,15 @@
         e.target.blur();
       }
     });
-    $('#sheet').addEventListener('change', (e) => { const p = e.target.dataset && e.target.dataset.pick; if (p && e.target.value) applyPick(p, e.target.value); });
+    $('#sheet').addEventListener('change', (e) => {
+      const p = e.target.dataset && e.target.dataset.pick; if (p && e.target.value) applyPick(p, e.target.value);
+      if (e.target.classList.contains('mp-check')) { mpSetChecked(e.target.closest('.mp-row'), e.target.checked); mpUpdateSum(); }
+      if (e.target.id === 'mp_vorlage' && e.target.value) mpApplyVorlage(e.target.value);
+      if (e.target.id === 'mv_save' && e.target.checked) setTimeout(() => $('#mv_name')?.focus(), 50);
+    });
+    $('#sheet').addEventListener('input', (e) => {
+      if (e.target.classList.contains('mp-menge')) { const row = e.target.closest('.mp-row'); if (e.target.value && !$('.mp-check', row).checked) mpSetChecked(row, true); mpUpdateSum(); }
+    });
     $('#sheet').addEventListener('input', (e) => { if (e.target.dataset && e.target.dataset.bw) updateBulkDiff(e.target); });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', fitSheet);
