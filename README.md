@@ -10,6 +10,30 @@ Aktuelle Version: **1.7.0**
 
 ---
 
+## Screenshots
+
+*Alle Namen, Daten und Belege in den Screenshots sind frei erfunden.*
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="screenshots/01-igel-liste.png" width="250" alt="Igel-Liste"><br><b>Igel-Liste</b><br><sub>Status, Box, Gewicht, Trend und Gewichtsalarm</sub></td>
+    <td align="center" width="33%"><img src="screenshots/02-heute.png" width="250" alt="Heute"><br><b>Heute</b><br><sub>Alles, was fällig ist, auf einen Blick</sub></td>
+    <td align="center" width="33%"><img src="screenshots/03-igel-uebersicht.png" width="250" alt="Igel-Übersicht"><br><b>Igel-Übersicht</b><br><sub>Kennzahlen, Fotos, Kosten, Stammdaten</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="screenshots/04-gewicht.png" width="250" alt="Gewicht"><br><b>Gewicht</b><br><sub>Verlauf mit Zielgewicht und Wiegeprotokoll</sub></td>
+    <td align="center"><img src="screenshots/05-gabenprotokoll.png" width="250" alt="Gabenprotokoll"><br><b>Gabenprotokoll</b><br><sub>Jeder Behandlungstag, fehlende Gaben rot</sub></td>
+    <td align="center"><img src="screenshots/06-futterprotokoll.png" width="250" alt="Futterprotokoll"><br><b>Futterprotokoll</b><br><sub>Nach Tagen gegliedert mit Tagessumme</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="screenshots/07-mahlzeit.png" width="250" alt="Mahlzeit eintragen"><br><b>Mahlzeit eintragen</b><br><sub>Mehrere Komponenten, Vorlage mit einem Tipp</sub></td>
+    <td align="center"><img src="screenshots/08-rechnungen.png" width="250" alt="Rechnungen"><br><b>Rechnungen</b><br><sub>Mit Beleg, Status und Jahressummen</sub></td>
+    <td align="center"><img src="screenshots/09-statistik.png" width="250" alt="Statistik"><br><b>Jahresstatistik</b><br><sub>Aufnahmen, Ausgänge, Kosten</sub></td>
+  </tr>
+</table>
+
+---
+
 ## Funktionen
 
 ### Igel
