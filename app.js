@@ -5,7 +5,7 @@
  * Es gibt keinerlei Netzwerkzugriffe auf Nutzerdaten.
  */
 (function () {
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
 
   // ---------- Konstanten ----------
   const STORES = ['igel', 'gewichte', 'medikation', 'gaben', 'befunde', 'tierarzt', 'futter', 'fotos', 'rechnungen', 'settings'];
@@ -23,7 +23,7 @@
   const BEFALL = [['', '–'], ['gering', 'gering'], ['mittel', 'mittel'], ['stark', 'stark']];
   const GEFRESSEN = [['alles', 'alles'], ['fast', 'fast alles'], ['haelfte', 'etwa die Hälfte'], ['wenig', 'wenig'], ['nichts', 'nichts'], ['offen', 'nicht kontrolliert']];
   const FUTTER_VORSCHLAEGE = ['Katzenfutter (Nass)', 'Katzen-Trockenfutter', 'Igel-Trockenfutter', 'Rührei (ungewürzt)', 'Hähnchen gekocht', 'Insekten', 'Aufzuchtmilch'];
-  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null, mahlzeitVorlagen: null, parasitenListe: null };
+  const DEFAULTS = { id: 'main', pflegestelle: '', ansprechpartner: '', kontakt: '', zielgewicht: 600, wiegenTage: 1, wiegenTageWinter: 7, alarmProzent: 5, alarmTage: 3, lastBackup: null, medListe: null, futterListe: null, mahlzeitVorlagen: null, parasitenListe: null, wiegestation: false };
 
   // ---------- Zustand ----------
   let db;
@@ -336,7 +336,7 @@
         ${[['aktiv', `In Pflege (${cntA})`], ['abgeschlossen', 'Abgeschlossen'], ['alle', 'Alle']].map(([v, l]) => `<button data-act="filter" data-v="${v}" class="${ui.filter === v ? 'active' : ''}">${l}</button>`).join('')}
       </div>
       <div class="toolbar"><input class="search" id="search" type="search" placeholder="Suchen (Name, Nr., Box, Fundort, Finder)" value="${esc(ui.search)}" autocomplete="off"></div>
-      ${cntA ? `<div class="btn-row" style="margin-bottom:12px"><button class="btn small secondary" data-act="bulkWeigh">⚖️ Alle wiegen</button><button class="btn small secondary" data-act="bulkFeed">🍽️ Alle füttern</button></div>` : ''}`;
+      ${cntA ? `<div class="btn-row" style="margin-bottom:12px"><button class="btn small secondary" data-act="bulkWeigh">⚖️ Alle wiegen</button><button class="btn small secondary" data-act="bulkFeed">🍽️ Alle füttern</button></div>${S.wiegestation ? '<button class="btn small" data-act="wiegestation" style="margin:-4px 0 12px">📶 Wiegestation (Bluetooth-Waage)</button>' : ''}` : ''}`;
     if (!D.igel.length) {
       return html + `<div class="empty"><div class="big">🦔</div><p>Noch keine Igel erfasst.</p><button class="btn" data-act="newIgel" style="max-width:260px">Ersten Igel aufnehmen</button></div>`;
     }
@@ -659,7 +659,7 @@
         </div>`).join('')}</div>`;
     } else html += `<div class="card note">Heute keine Medikamente fällig.</div>`;
 
-    html += `<div class="section-title">Wiegen fällig ${anyActive ? '<button class="link" data-act="bulkWeigh">⚖️ Alle wiegen</button>' : ''}</div>`;
+    html += `<div class="section-title">Wiegen fällig ${anyActive ? `<button class="link" data-act="bulkWeigh">⚖️ Alle wiegen</button>${S.wiegestation ? ' <button class="link" data-act="wiegestation">📶 Wiegestation</button>' : ''}` : ''}</div>`;
     if (d.wiegen.length) {
       html += `<div class="list">${d.wiegen.map(({ igel, seit, lw }) => `
         <div class="row due"><span class="grow">${igelLink(igel)}<br><span class="s">${lw ? `zuletzt ${fmtNum(lw.gramm)} g, vor ${seit} ${seit === 1 ? 'Tag' : 'Tagen'}` : 'noch nie gewogen'}</span></span>
@@ -938,6 +938,11 @@
         <button class="row" data-act="parasitenliste"><span class="grow"><span class="t">🔬 Parasitenliste</span><br><span class="s">Auswahl für Kotproben</span></span><span class="r">${S.parasitenListe.length}</span><span class="chev">›</span></button>
         <button class="row" data-act="finderliste"><span class="grow"><span class="t">👤 Finderliste</span><br><span class="s">Alle Finder mit Kontakt und ihren Igeln</span></span><span class="r">${finderList().length}</span><span class="chev">›</span></button>
       </div>
+      <div class="section-title">Zusatzfunktionen</div>
+      <div class="form">
+        <label class="field checks-field"><span class="checks"><label><input type="checkbox" id="s_wiegestation"${S.wiegestation ? ' checked' : ''}> 📶 Wiegestation (Bluetooth-Waage)</label></span></label>
+      </div>
+      <p class="note">Für eine umgebaute Waage, die sich als Bluetooth-Tastatur mit dem iPhone koppelt und das stabile Gewicht eintippt. Eingeschaltet erscheint unter „Igel“ und „Heute“ die Taste „Wiegestation“. Ausgeschaltet bleibt alles wie gewohnt.</p>
       <div class="section-title">Pflegestelle (erscheint im PDF)</div>
       <div class="form">
         <label class="field"><span>Name der Pflegestelle</span><input id="s_pflegestelle" value="${esc(S.pflegestelle)}"></label>
@@ -1455,6 +1460,64 @@
     const em = el.parentElement.querySelector('.bw-diff'); const g = num(el.value); const last = num(el.dataset.last);
     if (g == null || last == null) { em.textContent = ''; em.className = 'bw-diff'; return; }
     const d = g - last; em.textContent = `${signed(d)} g`; em.className = 'bw-diff ' + (d > 0 ? 'up' : d < 0 ? 'down' : '');
+  }
+
+  // ---------- Zusatzfunktion: Wiegestation (Bluetooth-Waage als Tastatur) ----------
+  // Die Waage tippt das stabile Gewicht plus Return in das Feld #ws_in. Jede Wiegung wird sofort gespeichert,
+  // danach springt die Auswahl zum nächsten noch nicht gewogenen Igel. Werte lassen sich in der Tabelle ändern.
+  const ws = { sel: null, rec: {} };
+  function scaleSheet() {
+    const list = D.igel.filter((i) => ACTIVE.has(i.status)).sort(byBox);
+    if (!list.length) { toast('Keine Igel in Pflege.'); return; }
+    ws.rec = {}; ws.sel = list[0].id;
+    const t = today();
+    const body = `
+      <p class="note">Waage in den iPhone-Einstellungen unter Bluetooth koppeln. Dann Igel antippen und auf die Waage setzen: Das stabile Gewicht wird eingetragen und sofort gespeichert, danach ist der nächste Igel dran. Werte in der Tabelle lassen sich ändern, ein leeres Feld löscht die Wiegung.</p>
+      <div class="form ws-capture"><label class="field"><span>Nächste Wiegung für: <strong id="ws_for"></strong></span>
+        <input id="ws_in" inputmode="decimal" enterkeyhint="done" autocomplete="off" placeholder="wartet auf die Waage …"></label></div>
+      <div class="list ws-list">${list.map((i) => {
+        const lw = lastWeight(i.id); const heute = lw && dayOf(lw.datum) === t;
+        return `<div class="row ws-row" data-ws-row="${i.id}">
+          <button class="grow ws-pick" data-sheet="wsSel" data-id="${i.id}"><span class="t">${esc(igelName(i))}</span><br><span class="s">${i.box ? `Box ${esc(i.box)} · ` : ''}${i.status === 'winterschlaf' ? '💤 · ' : ''}${lw ? `zuletzt ${fmtNum(lw.gramm)} g (${heute ? 'heute' : fmtShort(lw.datum)})` : 'noch nie gewogen'}</span></button>
+          <span class="bulk-in ws-val"><input data-ws="${i.id}" data-last="${lw ? lw.gramm : ''}" inputmode="decimal" enterkeyhint="done" placeholder="g" autocomplete="off"><em class="bw-diff"></em></span></div>`;
+      }).join('')}</div>`;
+    openSheet({ title: 'Wiegestation', body, cancelLabel: 'Fertig', onOpen: () => { wsSelect(ws.sel); } });
+  }
+  function wsSelect(id) {
+    ws.sel = id;
+    $$('.ws-row', $('#sheet')).forEach((r) => r.classList.toggle('sel', r.dataset.wsRow === id));
+    const f = $('#ws_for'); if (f) f.textContent = id ? igelName(igelById(id)) : 'alle gewogen ✓';
+    const row = id && $(`[data-ws-row="${id}"]`, $('#sheet')); if (row) row.scrollIntoView({ block: 'nearest' });
+    const inp = $('#ws_in'); if (inp) { inp.value = ''; inp.focus(); }
+  }
+  async function wsStore(igelId, g) {
+    const old = ws.rec[igelId] && D.gewichte.find((x) => x.id === ws.rec[igelId]);
+    if (g == null) { if (old) { await remove('gewichte', old.id); delete ws.rec[igelId]; } return; }
+    const r = await save('gewichte', old ? { ...old, gramm: g } : { igelId, datum: nowDT(), gramm: g, notiz: 'Wiegestation' });
+    ws.rec[igelId] = r.id;
+  }
+  async function wsCapture() {
+    const inp = $('#ws_in'); const g = num(inp.value); inp.value = '';
+    if (g == null) return;
+    if (!ws.sel) { toast('Alle Igel sind gewogen. Zum Nachwiegen den Igel in der Liste antippen.'); return; }
+    if (g <= 0 || g > 3000) { toast(`${fmtNum(g)} g ist unplausibel – nicht übernommen.`); return; }
+    const id = ws.sel; const el = $(`[data-ws="${id}"]`, $('#sheet'));
+    el.value = String(g).replace('.', ','); updateBulkDiff(el);
+    await wsStore(id, g);
+    el.closest('.ws-row').classList.add('done');
+    const i = igelById(id); const al = weightAlarm(i);
+    toast(`${igelName(i)}: ${fmtNum(g)} g gespeichert${al ? ' · ⚠️ Gewichtsalarm' : ''}`, al ? 4000 : 1800);
+    const ids = $$('[data-ws-row]', $('#sheet')).map((r) => r.dataset.wsRow);
+    const k = ids.indexOf(id);
+    const nxt = [...ids.slice(k + 1), ...ids.slice(0, k)].find((x) => !ws.rec[x]);
+    wsSelect(nxt || null);
+  }
+  async function wsEdit(el) {
+    const g = num(el.value);
+    if (g != null && (g <= 0 || g > 3000)) { toast('Gewicht unplausibel – bitte prüfen.'); return; }
+    await wsStore(el.dataset.ws, g);
+    el.closest('.ws-row').classList.toggle('done', g != null);
+    toast(g == null ? 'Wiegung gelöscht' : 'Gewicht geändert');
   }
 
   // ---------- Schnellerfassung: Alle füttern ----------
@@ -2067,6 +2130,7 @@
     editFutter: (d) => { const f = D.futter.find((x) => x.id === d.id); if (f) futterForm(f.igelId, f); },
     futterAlle: () => { ui.futterAlle = true; render(); },
     bulkWeigh: () => bulkWeighSheet(),
+    wiegestation: () => scaleSheet(),
     bulkFeed: () => bulkFeedSheet(),
     statistik: () => go({ name: 'statistik' }),
     medliste: () => go({ name: 'medliste' }),
@@ -2114,7 +2178,8 @@
   };
 
   const sheetActions = {
-    cancel: () => closeSheet(),
+    cancel: () => { const wasWs = !!$('#ws_in'); closeSheet(); if (wasWs) render(); },
+    wsSel: (el) => wsSelect(el.dataset.id),
     save: async (el, sh) => {
       if (!sh._onSave || sh._saving) return; sh._saving = true;
       if (document.activeElement && sh.contains(document.activeElement)) document.activeElement.blur();
@@ -2160,7 +2225,10 @@
         render(); const s = $('#' + id); if (s) { s.focus(); try { s.setSelectionRange(pos, pos); } catch (_) { /* */ } }
       }
     });
-    $('#view').addEventListener('change', (e) => { if (e.target.id === 'restoreFile' && e.target.files[0]) { restoreBackup(e.target.files[0]); e.target.value = ''; } });
+    $('#view').addEventListener('change', async (e) => {
+      if (e.target.id === 'restoreFile' && e.target.files[0]) { restoreBackup(e.target.files[0]); e.target.value = ''; }
+      if (e.target.id === 's_wiegestation') { S.wiegestation = e.target.checked; await saveSettings(); toast(S.wiegestation ? 'Wiegestation eingeschaltet' : 'Wiegestation ausgeschaltet'); }
+    });
     $('#sheet').addEventListener('click', (e) => {
       const el = e.target.closest('[data-sheet]'); if (!el) return;
       e.preventDefault(); const fn = sheetActions[el.dataset.sheet]; if (fn) fn(el, $('#sheet'));
@@ -2171,6 +2239,8 @@
       if (e.key === 'Enter' && e.target.matches('input:not([type=checkbox])')) {
         e.preventDefault();
         if (e.target.id === 'mp_neu' || e.target.id === 'mp_neu_menge') { sheetActions.mpAdd(); return; }
+        if (e.target.id === 'ws_in') { wsCapture(); return; }
+        if (e.target.dataset.ws) { e.target.blur(); $('#ws_in')?.focus(); return; }
         if (e.target.dataset.bw) { // Alle wiegen: zum nächsten Igel springen
           const all = $$('[data-bw]', $('#sheet')); const nxt = all[all.indexOf(e.target) + 1];
           if (nxt) { nxt.focus(); return; }
@@ -2183,17 +2253,18 @@
       if (e.target.classList.contains('mp-check')) { mpSetChecked(e.target.closest('.mp-row'), e.target.checked); mpUpdateSum(); }
       if (e.target.id === 'mp_vorlage' && e.target.value) mpApplyVorlage(e.target.value);
       if (e.target.id === 'mv_save' && e.target.checked) setTimeout(() => $('#mv_name')?.focus(), 50);
+      if (e.target.dataset && e.target.dataset.ws) wsEdit(e.target);
     });
     $('#sheet').addEventListener('input', (e) => {
       if (e.target.classList.contains('mp-menge')) { const row = e.target.closest('.mp-row'); if (e.target.value && !$('.mp-check', row).checked) mpSetChecked(row, true); mpUpdateSum(); }
     });
-    $('#sheet').addEventListener('input', (e) => { if (e.target.dataset && e.target.dataset.bw) updateBulkDiff(e.target); });
+    $('#sheet').addEventListener('input', (e) => { if (e.target.dataset && (e.target.dataset.bw || e.target.dataset.ws)) updateBulkDiff(e.target); });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', fitSheet);
       window.visualViewport.addEventListener('scroll', fitSheet);
     }
     window.addEventListener('resize', fitSheet);
-    $('#sheetBackdrop').addEventListener('click', closeSheet);
+    $('#sheetBackdrop').addEventListener('click', () => sheetActions.cancel());
     $('#btnBack').addEventListener('click', back);
     $$('.tabbar button').forEach((b) => b.addEventListener('click', () => {
       const t = b.dataset.tab; ui.prev = null;

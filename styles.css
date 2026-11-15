@@ -258,3 +258,13 @@ a { color: var(--accent); font-weight: 600; text-decoration: none; }
 .mp-add input { flex: 1; border: 1px solid var(--line) !important; border-radius: 8px; padding: 6px 8px !important; font-size: 16px !important; }
 .mp-add input#mp_neu_menge { flex: 0 0 64px; text-align: right; }
 .checks-field .checks { padding-top: 0; }
+
+/* Zusatzfunktion Wiegestation */
+.ws-capture #ws_in { font-size: 28px; font-weight: 700; }
+.ws-row { gap: 8px; padding: 8px 10px 8px 4px; }
+.ws-row .ws-pick { background: none; border: 0; text-align: left; padding: 4px 6px; color: var(--text); font: inherit; }
+.ws-row.sel { background: var(--accent-soft); box-shadow: inset 4px 0 0 var(--accent); }
+.ws-row.done .t::after { content: ' ✓'; color: var(--ok); }
+.ws-val { display: flex; align-items: center; gap: 6px; width: 132px; flex: none; }
+.ws-val input { flex: none; width: 64px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 17px; text-align: right; background: var(--card); color: var(--text); }
+.ws-capture #ws_in::placeholder { font-size: 17px; font-weight: 400; }
