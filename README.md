@@ -6,7 +6,7 @@
 
 Alle Daten (Igel, Gewichte, Fotos, Medikation, Fütterungen, Rechnungen …) liegen **ausschließlich auf dem iPhone**. Die App schickt keine Daten an einen Server, hat kein Tracking und lädt keine Bibliotheken von fremden Servern. In diesem Repository liegt nur der Programmcode.
 
-Aktuelle Version: **1.7.0**
+Aktuelle Version: **1.8.0**
 
 ---
 
@@ -48,6 +48,7 @@ Aktuelle Version: **1.7.0**
 - Zunahme seit Aufnahme und Ø g/Tag über 7 Tage
 - **Gewichtsalarm:** wenn ein Igel 2× in Folge abnimmt oder mehr als X % in N Tagen verliert. Beides ist einstellbar, Igel im Winterschlaf sind ausgenommen.
 - **Alle wiegen:** alle Igel nacheinander, sortiert nach Box. Die Taste „Weiter“ springt zum nächsten Igel.
+- **Wiegestation (Zusatzfunktion, Einstellungen → Zusatzfunktionen):** für eine umgebaute Waage, die sich als Bluetooth-Tastatur mit dem iPhone koppelt. Igel antippen, auf die Waage setzen: Das stabile Gewicht wird eingetragen, sofort gespeichert, und der nächste Igel ist dran. Die Werte stehen in einer Tabelle und lassen sich ändern. Standardmäßig ausgeschaltet.
 
 ### Medizin
 - **Medikation** mit Dosis, Verabreichung, Gaben pro Tag und Dauer
@@ -128,6 +129,7 @@ Die Daten bleiben bei Updates erhalten.
 ## Versionen
 | Version | Neu |
 |---|---|
+| 1.8.0 | Zusatzfunktion Wiegestation (Bluetooth-Waage), ein- und ausschaltbar |
 | 1.7.0 | Eigene, bearbeitbare Parasitenliste. Kotprobe mit „Anderer Parasit“. |
 | 1.6.0 | Mahlzeiten aus mehreren Komponenten, Futterprotokoll nach Tagen mit Tagessumme, Mahlzeit-Vorlagen |
 | 1.5.0 | Bereich Rechnungen mit Belegen (Foto/PDF), Kosten pro Igel, Rechnung aus Tierarztbesuch |
